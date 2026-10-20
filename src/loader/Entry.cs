@@ -62,6 +62,59 @@ namespace PclHarmony
             catch
             {
             }
+
+            // TLS repair - see RepairTlsDefaults for the full explanation.
+            // Runs before the launcher's Main(), i.e. before any networking.
+            try
+            {
+                RepairTlsDefaults();
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// Injects an AppDomainManager makes the CLR treat the host as a legacy
+        /// (pre-v4) framework application. That has two visible consequences,
+        /// and this project has to defuse both:
+        ///
+        ///   1. legacy path handling -> the launcher's <c>\\?\</c> extended paths
+        ///      are rejected and it dies with "运行环境错误". Handled by the
+        ///      <c>Switch.System.IO.UseLegacyPathHandling=false</c> entry that
+        ///      install.ps1 writes into the exe.config.
+        ///
+        ///   2. legacy TLS defaults -> SecurityProtocol stays at "Ssl3, Tls" and
+        ///      never picks up TLS 1.2+, so every HTTPS request fails with
+        ///      SecureChannelFailure and the launcher reports
+        ///      "你的网络环境不佳…". PCL only sets SecurityProtocol on
+        ///      Windows &lt; 8, so on modern Windows it relies on the default and
+        ///      never repairs this itself.
+        ///
+        /// (2) is repaired here rather than in the config so that a
+        /// hand-edited or partially merged exe.config cannot break networking.
+        /// Protocols are only ever *added*, never removed.
+        /// </summary>
+        private static void RepairTlsDefaults()
+        {
+            try
+            {
+                const System.Net.SecurityProtocolType Tls12 =
+                    (System.Net.SecurityProtocolType)3072;    // Tls12
+                const System.Net.SecurityProtocolType Tls13 =
+                    (System.Net.SecurityProtocolType)12288;   // Tls13 (no-op on older CLR/OS)
+
+                System.Net.SecurityProtocolType current =
+                    System.Net.ServicePointManager.SecurityProtocol;
+                System.Net.SecurityProtocolType repaired = current | Tls12 | Tls13;
+
+                if (repaired != current)
+                    System.Net.ServicePointManager.SecurityProtocol = repaired;
+            }
+            catch
+            {
+                // A failed repair must never stop the launcher.
+            }
         }
 
         private static void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
@@ -81,6 +134,20 @@ namespace PclHarmony
                 LoaderLog.Info("PclHarmony loader " + typeof(Entry).Assembly.GetName().Version
                                + " attached (ADM PclHarmony.Entry)");
                 LoaderLog.Info("target assembly loaded: " + loaded.FullName);
+
+                // Belt and braces: re-apply the TLS default repair now that the
+                // launcher's own assemblies are coming up. Some hosts reset
+                // ServicePointManager during WPF initialisation.
+                try
+                {
+                    System.Net.SecurityProtocolType before =
+                        System.Net.ServicePointManager.SecurityProtocol;
+                    RepairTlsDefaults();
+                    System.Net.SecurityProtocolType after =
+                        System.Net.ServicePointManager.SecurityProtocol;
+                    LoaderLog.Info("TLS: SecurityProtocol " + before + " -> " + after);
+                }
+                catch { }
 
                 if (_disabled)
                 {

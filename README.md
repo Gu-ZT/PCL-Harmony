@@ -1,4 +1,4 @@
-# PCL Harmony
+﻿# PCL Harmony
 
 **为 [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL) 提供 Harmony 插件加载能力。**
 
@@ -52,13 +52,29 @@ CLR 在创建 AppDomain 时会先实例化 `PclHarmony.Entry`（它继承自 `Ap
 
 **这一项不能省。** 一旦通过 `appDomainManagerAssembly` 注入，如果不同时关掉 legacy 路径处理，CLR 会回退到旧的路径规则，PCL 构造的 `\\?\` 扩展前缀路径会在校验中被判为非法字符，启动器随即弹出 **「运行环境错误」** 并退出。开启该开关后 PCL 可正常进入主窗口（窗口标题为 `Plain Craft Launcher　`，末尾是一个 U+3000 全角空格）。
 
-### 4. 原生依赖解析：为什么加载器要自己实现 AssemblyResolve
+### 4. 为什么还要修 TLS 默认值
+
+注入 `AppDomainManager` 会让 CLR 把宿主当作 “v4 之前的旧式框架应用”，除了上一条的路径处理，还会带来第二个副作用：
+
+**`ServicePointManager.SecurityProtocol` 停留在 `Ssl3, Tls`，拿不到 TLS 1.2+。** 于是所有 HTTPS 请求都以 `SecureChannelFailure` 失败，启动器显示「你的网络环境不佳，请稍后再试，或使用 VPN 改善网络环境。」——下载页因此一直是空的。
+
+PCL 自己不会修这个问题：它只在 `Environment.OSVersion < 6.2`（Windows 8 之前）时才设置 `SecurityProtocol`，现代 Windows 上它完全依赖 CLR 默认值，而默认值已经被注入带偏了。
+
+**加载器在 `InitializeNewDomain` 里主动补齐 TLS 1.2 / 1.3**，并且只做“添加”——不会移除宿主已配置的协议。这一步发生在 PCL 的 `Main()` 之前，早于任何网络请求。修复结果会写进 `PclHarmony.log`：
+
+```
+TLS: SecurityProtocol Ssl3, Tls -> Ssl3, Tls, Tls12, Tls13
+```
+
+之所以放在代码里而不是只靠 config 开关（`Switch.System.Net.DontEnableSchUseStrongCrypto=false`），是因为该项只在极早期读取一次，config 被手工改动或合并异常时就会静默失效；写在加载器里更可靠。
+
+### 5. 原生依赖解析：为什么加载器要自己实现 AssemblyResolve
 
 PCL 把它的全部依赖（`MeloongCore`、`MeloongCore.Wpf`、`PCLCS`、`Newtonsoft.Json`、`NAudio`、`Ookii.Dialogs.Wpf`、`Imazen.WebP`、`CacheCow.*`、`ThrottleDebounce`、`System.Net.Http.Formatting`、`Microsoft.Win32.Registry`，共 13 个）以 `byte[]` 形式内嵌在自身的清单资源 `PCL.Resources.resources` 里，并在 `Application.New()` 中注册 `AssemblyResolve` 处理器按需解出。
 
 问题在于：**Harmony 需要在 `Application.New()` 运行之前就解析被补丁方法的元数据**，此时 PCL 的解析器还不存在，这些依赖会抛 `FileNotFoundException`。因此加载器必须自己提前实现一份同款解析器（`EmbeddedResolver`），从同一份资源里按前缀取出 `byte[]` 并 `Assembly.Load`。
 
-### 5. 项目结构
+### 6. 项目结构
 
 ```
 src/loader/                加载器 C# 源码（net48，输出 PclHarmony.dll）
@@ -325,6 +341,6 @@ cd PCL-Harmony
 
 ## 许可与归属
 
-- **本仓库的加载器与示例插件源码**：见仓库内的许可文件。
+- **本仓库的加载器与示例插件源码**：MIT 许可，见 [LICENSE](./LICENSE)。
 - **Lib.Harmony**：MIT 许可，见 [pardeike/Harmony](https://github.com/pardeike/Harmony)。Release 中分发的 `0Harmony.dll`（Lib.Harmony 2.4.2 的 net48 构建）依其原许可分发。
 - **Plain Craft Launcher 2**：其版权归原作者所有。PCL **不是**以常见的开源许可发布——其许可证为一份限定分发范围的许可（见 PCL 仓库中的 `LICENCE`）。本仓库**不重新分发 PCL 本体**，也不包含 PCL 的源码；加载器只是在你本地的 PCL 上于运行时打补丁。使用前请自行确认你所在地区的法律法规与 PCL 的许可条款。

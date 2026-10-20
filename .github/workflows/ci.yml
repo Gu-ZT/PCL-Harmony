@@ -1,18 +1,29 @@
-name: CI
+name: CI and Release
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  # Shipped inside the installer archive; bump together with the loader's
+  # AssemblyVersion in src/loader/PclHarmony.csproj.
+  PRODUCT_VERSION: "1.0.0"
 
 jobs:
+  # ---------------------------------------------------------------- build ----
   build:
     name: Build loader and sample plugin
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -24,6 +35,32 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+
+      # Branch pushes produce a pre-release v<version>-dev.<run_number>;
+      # v* tags produce a stable release v<version>. Same rule as the
+      # reference dsh-launcher pipeline.
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $base = $env:PRODUCT_VERSION
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag   = $env:GITHUB_REF_NAME
+            $bare  = $tag -replace '^v', ''
+            if ($bare -ne $base) {
+              throw "tag $tag does not match PRODUCT_VERSION $base"
+            }
+            $version    = $bare
+            $prerelease = if ($bare -match '-') { 'true' } else { 'false' }
+          } else {
+            $version    = "$base-dev.$env:GITHUB_RUN_NUMBER"
+            $tag        = "v$version"
+            $prerelease = 'true'
+          }
+          "version=$version"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag"               | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version=$version prerelease=$prerelease tag=$tag"
 
       - name: Build and stage dist
         shell: pwsh
@@ -38,19 +75,93 @@ jobs:
             'dist/plugins/Test.dll'
           )
           foreach ($file in $expected) {
-            if (-not (Test-Path -LiteralPath $file)) {
-              throw "missing build output: $file"
-            }
-            $item = Get-Item -LiteralPath $file
-            Write-Host ("{0,-38} {1,10} bytes" -f $file, $item.Length)
+            if (-not (Test-Path -LiteralPath $file)) { throw "missing build output: $file" }
+            Write-Host ("{0,-38} {1,10} bytes" -f $file, (Get-Item -LiteralPath $file).Length)
           }
+
+      # Assemble the distribution. The archive is FLAT at the top level:
+      #   install.ps1  uninstall.ps1  README.md  README.en_US.md  LICENSE
+      #   PclHarmony.dll  0Harmony.dll  plugins/Test.dll
+      # so that unzipping it next to the launcher gives install.ps1 everything
+      # it needs, and the two DLLs sit at the archive root as users expect.
+      - name: Assemble distribution archive
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'pcl-harmony'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'plugins') | Out-Null
+
+          $files = @(
+            'install.ps1',
+            'uninstall.ps1',
+            'README.md',
+            'README.en_US.md',
+            'LICENSE'
+          )
+          foreach ($f in $files) {
+            Copy-Item -LiteralPath $f -Destination $stage -Force
+          }
+
+          # Loader DLLs at the archive ROOT.
+          Copy-Item -LiteralPath 'dist/PclHarmony/PclHarmony.dll' -Destination $stage -Force
+          Copy-Item -LiteralPath 'dist/PclHarmony/0Harmony.dll'   -Destination $stage -Force
+          Copy-Item -LiteralPath 'dist/plugins/Test.dll'          -Destination (Join-Path $stage 'plugins') -Force
+
+          $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+
+          Write-Host "archive: $zip ($((Get-Item -LiteralPath $zip).Length) bytes)"
+          Get-ChildItem -Recurse -File $stage |
+            ForEach-Object { "{0,-34} {1,10} bytes" -f $_.FullName.Substring($stage.Length + 1), $_.Length }
+
+          # Assert the contract the installer depends on.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $arc = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $names = $arc.Entries | ForEach-Object { $_.FullName -replace '\\','/' }
+            $required = @(
+              'install.ps1','uninstall.ps1','PclHarmony.dll','0Harmony.dll',
+              'README.md','README.en_US.md','LICENSE','plugins/Test.dll'
+            )
+            foreach ($r in $required) {
+              if ($names -notcontains $r) { throw "archive is missing required entry at expected path: $r" }
+            }
+            Write-Host "archive layout verified: $($required -join ', ')"
+          } finally { $arc.Dispose() }
+
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pcl-harmony-build
-          path: |
-            dist/PclHarmony/PclHarmony.dll
-            dist/PclHarmony/0Harmony.dll
-            dist/plugins/Test.dll
+          name: PCL-Harmony-${{ steps.version.outputs.version }}
+          path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
+
+  # -------------------------------------------------------------- release ----
+  # Runs on every push to main and on v* tags: branch pushes publish a
+  # pre-release, tag pushes publish a stable release.
+  release:
+    name: Publish release
+    needs: [build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download distribution archive
+        uses: actions/download-artifact@v4
+        with:
+          name: PCL-Harmony-${{ needs.build.outputs.version }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: ${{ needs.build.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ${{ runner.temp }}/dist/PCL-Harmony.zip

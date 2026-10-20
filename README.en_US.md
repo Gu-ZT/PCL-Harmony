@@ -1,4 +1,4 @@
-# PCL Harmony
+﻿# PCL Harmony
 
 **Harmony plugin loading for [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL).**
 
@@ -52,13 +52,29 @@ The installer writes this alongside the AppDomainManager identity:
 
 **This is not optional.** Once injection is active via `appDomainManagerAssembly`, leaving legacy path handling enabled makes the CLR fall back to the old path rules; the `\\?\` extended-prefix paths PCL builds then fail validation as containing illegal characters, and the launcher dies with a **"运行环境错误"** (environment error) dialog. With the switch in place PCL reaches its main window normally (title `Plain Craft Launcher　`, ending in a U+3000 ideographic space).
 
-### 4. Native dependency resolution: why the loader needs its own `AssemblyResolve`
+### 4. Why the TLS defaults must be repaired too
+
+Injecting an `AppDomainManager` makes the CLR treat the host as a *legacy* (pre-v4) framework application. Besides the path handling above, that has a second consequence:
+
+**`ServicePointManager.SecurityProtocol` stays at `Ssl3, Tls` and never picks up TLS 1.2+.** Every HTTPS request then fails with `SecureChannelFailure` and the launcher reports "你的网络环境不佳，请稍后再试，或使用 VPN 改善网络环境。" ("your network is poor…") — which is why the download page stays empty.
+
+PCL does not repair this itself: it only sets `SecurityProtocol` when `Environment.OSVersion < 6.2` (pre-Windows 8). On modern Windows it relies entirely on the CLR default, and the default has already been skewed by the injection.
+
+**The loader therefore adds TLS 1.2 / 1.3 explicitly in `InitializeNewDomain`**, additively — it never removes protocols the host already configured. This happens before the launcher's `Main()`, i.e. before any network request. The result is logged to `PclHarmony.log`:
+
+```
+TLS: SecurityProtocol Ssl3, Tls -> Ssl3, Tls, Tls12, Tls13
+```
+
+It lives in code rather than only in the config switch (`Switch.System.Net.DontEnableSchUseStrongCrypto=false`) because that switch is read exactly once very early: a hand-edited or badly merged `exe.config` would silently break networking again.
+
+### 5. Native dependency resolution: why the loader needs its own `AssemblyResolve`
 
 PCL embeds all of its dependencies (`MeloongCore`, `MeloongCore.Wpf`, `PCLCS`, `Newtonsoft.Json`, `NAudio`, `Ookii.Dialogs.Wpf`, `Imazen.WebP`, `CacheCow.*`, `ThrottleDebounce`, `System.Net.Http.Formatting`, `Microsoft.Win32.Registry` — 13 in total) as `byte[]` entries in its own manifest resource `PCL.Resources.resources`, and resolves them from an `AssemblyResolve` handler registered in `Application.New()`.
 
 The problem: **Harmony has to resolve the metadata of the methods it patches before `Application.New()` ever runs.** At that point PCL's resolver does not exist yet, so those dependencies throw `FileNotFoundException`. The loader therefore implements an equivalent resolver of its own (`EmbeddedResolver`) that serves the same resource by prefix and `Assembly.Load`s the bytes.
 
-### 5. Repository layout
+### 6. Repository layout
 
 ```
 src/loader/                loader C# sources (net48 -> PclHarmony.dll)
