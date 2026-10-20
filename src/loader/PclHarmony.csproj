@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>PclHarmony</AssemblyName>
+    <RootNamespace>PclHarmony</RootNamespace>
+    <LangVersion>7.3</LangVersion>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <Deterministic>true</Deterministic>
+    <Optimize>true</Optimize>
+    <NoWarn>CS0618</NoWarn>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>PCL Harmony plugin loader</Product>
+    <Company>PCL Harmony</Company>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Lib.Harmony is referenced through NuGet so the build is machine independent.
+         Private=true copies 0Harmony.dll into the output folder; it is then shipped
+         next to the launcher, where the injected loader resolves it by simple name. -->
+    <PackageReference Include="Lib.Harmony" Version="2.4.2">
+      <Private>true</Private>
+    </PackageReference>
+  </ItemGroup>
+</Project>

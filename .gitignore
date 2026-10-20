@@ -1,0 +1,28 @@
+# ---- build output ----------------------------------------------------------
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# ---- build products --------------------------------------------------------
+# The loader and the sample plugin are built by CI (.github/workflows/release.yml)
+# and published as release assets, so compiled output is never committed.
+dist/
+*.dll
+*.pdb
+*.exe
+
+# ---- the launcher itself is never vendored ---------------------------------
+/Plain Craft Launcher 2.exe
+/Plain Craft Launcher 2.exe.config
+/PclHarmony.log
+
+# ---- tooling / IDE ---------------------------------------------------------
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# ---- scratch ---------------------------------------------------------------
+.dsh-*/

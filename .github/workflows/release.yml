@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs are a build smoke test: they assemble and upload the archive as
+  # a workflow artifact, but only a real tag push publishes a GitHub Release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build and stage dist
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $expected = @(
+            'dist/PclHarmony/PclHarmony.dll',
+            'dist/PclHarmony/0Harmony.dll',
+            'dist/plugins/Test.dll'
+          )
+          foreach ($file in $expected) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "missing build output: $file"
+            }
+            Write-Host ("{0,-38} {1,10} bytes" -f $file, (Get-Item -LiteralPath $file).Length)
+          }
+
+      # Assemble the release archive. Layout is deliberately flat so that
+      # unzipping it next to the launcher gives install.ps1 everything it
+      # expects:
+      #   install.ps1  uninstall.ps1  PclHarmony.dll  0Harmony.dll  plugins/Test.dll
+      - name: Assemble release archive
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'pcl-harmony'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'plugins') | Out-Null
+
+          Copy-Item -LiteralPath 'install.ps1'                             -Destination $stage -Force
+          Copy-Item -LiteralPath 'uninstall.ps1'                           -Destination $stage -Force
+          Copy-Item -LiteralPath 'dist/PclHarmony/PclHarmony.dll'          -Destination $stage -Force
+          Copy-Item -LiteralPath 'dist/PclHarmony/0Harmony.dll'            -Destination $stage -Force
+          Copy-Item -LiteralPath 'dist/plugins/Test.dll'                   -Destination (Join-Path $stage 'plugins') -Force
+
+          # READMEs are shipped in the archive so the instructions travel with it.
+          Copy-Item -LiteralPath 'README.md'        -Destination (Join-Path $stage 'README.md')        -Force
+          Copy-Item -LiteralPath 'README.en_US.md'  -Destination (Join-Path $stage 'README.en_US.md')  -Force
+
+          $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+
+          Write-Host "archive: $zip ($((Get-Item -LiteralPath $zip).Length) bytes)"
+          Get-ChildItem -Recurse -File $stage | Select-Object FullName, Length | Format-Table -AutoSize
+
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # A GitHub Release is only created for real tag pushes. Manual runs are
+      # a build smoke test and stop after the archive is produced.
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.ZIP_PATH }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Upload release archive as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCL-Harmony-release
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
