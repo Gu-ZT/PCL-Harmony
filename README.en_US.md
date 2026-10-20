@@ -1,4 +1,4 @@
-﻿# PCL Harmony
+# PCL Harmony
 
 **Harmony plugin loading for [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL).**
 
@@ -77,6 +77,9 @@ The problem: **Harmony has to resolve the metadata of the methods it patches bef
 ### 6. Repository layout
 
 ```
+project.json               version manifest - the ONLY place the version lives
+                           (name / version / description)
+Directory.Build.props      feeds project.json's version into every assembly
 src/loader/                loader C# sources (net48 -> PclHarmony.dll)
   Entry.cs                 AppDomainManager entry point, subscribes to AssemblyLoad
   EmbeddedResolver.cs      embedded dependency resolution (PCL.Resources.resources)
@@ -85,11 +88,18 @@ src/loader/                loader C# sources (net48 -> PclHarmony.dll)
   IPlugin.cs               plugin interface
   PluginApi.cs             helper API exposed to plugins
 src/testplugin/            sample plugin C# sources (net48 -> Test.dll)
-install.ps1                one-shot installer
+install.ps1                one-shot installer (defaults to the current directory)
 uninstall.ps1              one-shot uninstaller
 build.ps1                  builds both projects and refreshes dist\
 dist/                      build output (produced by build.ps1, not version controlled)
 ```
+
+**Change the version only in `project.json`.** `Directory.Build.props` reads its `version` field and stamps every assembly with it, so binaries, release tags and the manifest cannot drift apart; CI additionally reads the version back out of `PclHarmony.dll` after building and fails on any mismatch.
+
+Stable releases (a `v*` tag) attach two extra files next to `PCL-Harmony.zip`:
+
+- `project.json` - the manifest used for that build;
+- `SHA256SUMS.txt` - the archive's SHA-256 checksum.
 
 This repository does not contain PCL itself or its source.
 
@@ -114,16 +124,16 @@ This repository does not contain PCL itself or its source.
    ```
 
 2. Close any running PCL.
-3. In PowerShell, run:
+3. Unzip the archive **into the PCL folder** (next to `Plain Craft Launcher 2.exe`) and run PowerShell there:
+
+   ```powershell
+   .\install.ps1
+   ```
+
+   `-TargetDir` is optional and defaults to the current directory. To install somewhere else, pass it explicitly:
 
    ```powershell
    .\install.ps1 -TargetDir "D:\path\to\PCL"
-   ```
-
-   If the script already sits inside the PCL folder you can omit `-TargetDir`:
-
-   ```powershell
-   .\install.ps1 -TargetDir .
    ```
 
 `install.ps1` performs three steps and is safe to re-run:
@@ -323,7 +333,7 @@ cd PCL-Harmony
 
 You can then install from `dist\` with `install.ps1 -TargetDir <PCL folder>`.
 
-Pushing a `v*` tag makes GitHub Actions build and publish a release automatically (see `.github/workflows/release.yml`).
+Pushing to `main` builds and publishes a **pre-release** (`v<version>-dev.<run_number>`); pushing a `v*` tag publishes a **stable release** and additionally attaches `project.json` and `SHA256SUMS.txt`. See `.github/workflows/ci.yml`.
 
 ---
 

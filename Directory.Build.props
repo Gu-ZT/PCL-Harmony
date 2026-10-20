@@ -1,0 +1,36 @@
+<Project>
+  <!--
+    Single source of truth for the product version: project.json in the repo
+    root. Every project under src/ inherits Version / AssemblyVersion /
+    FileVersion / InformationalVersion from here, so the shipped binaries and
+    the release tag can never drift apart.
+
+    Change the version ONLY in project.json.
+  -->
+
+  <PropertyGroup>
+    <_ManifestPath>$(MSBuildThisFileDirectory)project.json</_ManifestPath>
+  </PropertyGroup>
+
+  <Target Name="_ReadProductVersion" BeforeTargets="BeforeBuild;GenerateAssemblyInfo">
+    <Error Condition="!Exists('$(_ManifestPath)')"
+           Text="project.json not found at $(_ManifestPath)" />
+
+    <PropertyGroup>
+      <_ManifestText>$([System.IO.File]::ReadAllText('$(_ManifestPath)'))</_ManifestText>
+      <_ProductVersion>$([System.Text.RegularExpressions.Regex]::Match($(_ManifestText), '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</_ProductVersion>
+    </PropertyGroup>
+
+    <Error Condition="'$(_ProductVersion)' == ''"
+           Text="project.json has no 'version' field" />
+
+    <PropertyGroup>
+      <Version>$(_ProductVersion)</Version>
+      <FileVersion>$(_ProductVersion)</FileVersion>
+      <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(_ProductVersion)</AssemblyVersion>
+      <InformationalVersion>$(_ProductVersion)</InformationalVersion>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="version $(_ProductVersion) from project.json" />
+  </Target>
+</Project>

@@ -10,10 +10,9 @@ on:
 permissions:
   contents: write
 
-env:
-  # Shipped inside the installer archive; bump together with the loader's
-  # AssemblyVersion in src/loader/PclHarmony.csproj.
-  PRODUCT_VERSION: "1.0.0"
+# The product version lives in project.json (repo root); nothing is hardcoded
+# here. src/loader/PclHarmony.csproj must keep its AssemblyVersion in sync - the
+# "Resolve version" step fails the build if the two disagree.
 
 jobs:
   # ---------------------------------------------------------------- build ----
@@ -36,6 +35,9 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      # project.json in the repo root is the single source of truth for the
+      # product version. Directory.Build.props feeds it into every project, so
+      # there is nothing else to keep in sync.
       # Branch pushes produce a pre-release v<version>-dev.<run_number>;
       # v* tags produce a stable release v<version>. Same rule as the
       # reference dsh-launcher pipeline.
@@ -43,13 +45,17 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $base = $env:PRODUCT_VERSION
+          $manifestPath = 'project.json'
+          if (-not (Test-Path -LiteralPath $manifestPath)) { throw "missing $manifestPath" }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $base = [string]$manifest.version
+          if ([string]::IsNullOrWhiteSpace($base)) { throw "project.json has no version field" }
+          Write-Host "project.json version = $base"
+
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $tag   = $env:GITHUB_REF_NAME
-            $bare  = $tag -replace '^v', ''
-            if ($bare -ne $base) {
-              throw "tag $tag does not match PRODUCT_VERSION $base"
-            }
+            $tag  = $env:GITHUB_REF_NAME
+            $bare = $tag -replace '^v', ''
+            if ($bare -ne $base) { throw "tag $tag does not match project.json version $base" }
             $version    = $bare
             $prerelease = if ($bare -match '-') { 'true' } else { 'false' }
           } else {
@@ -77,6 +83,16 @@ jobs:
           foreach ($file in $expected) {
             if (-not (Test-Path -LiteralPath $file)) { throw "missing build output: $file" }
             Write-Host ("{0,-38} {1,10} bytes" -f $file, (Get-Item -LiteralPath $file).Length)
+          }
+
+          # The shipped binary must carry the manifest version. This is the
+          # end-to-end proof that project.json really drives the build.
+          $base = [string](Get-Content -LiteralPath 'project.json' -Raw | ConvertFrom-Json).version
+          $asm  = [System.Reflection.AssemblyName]::GetAssemblyName(
+                    (Resolve-Path 'dist/PclHarmony/PclHarmony.dll')).Version.ToString()
+          Write-Host "manifest=$base  PclHarmony.dll=$asm"
+          if (-not $asm.StartsWith("$base.")) {
+            throw "version drift: project.json=$base but PclHarmony.dll reports $asm"
           }
 
       # Assemble the distribution. The archive is FLAT at the top level:
@@ -165,3 +181,37 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ runner.temp }}/dist/PCL-Harmony.zip
+
+      # Stable releases additionally publish a manifest (project.json as built)
+      # plus a checksum file, so consumers and mirrors can verify what they got.
+      - name: Attach version manifest and checksums
+        if: needs.build.outputs.prerelease == 'false'
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          $zip = 'PCL-Harmony.zip'
+          if (-not (Test-Path -LiteralPath $zip)) { throw "missing $zip" }
+
+          # project.json is the release manifest: name, version, description.
+          $src = Join-Path $env:GITHUB_WORKSPACE 'project.json'
+          if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination 'project.json' -Force
+            Write-Host "project.json:"
+            Get-Content -LiteralPath 'project.json'
+          } else {
+            throw "missing project.json in workspace"
+          }
+
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "{0}  {1}" -f $hash, $zip | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
+          Write-Host "SHA256SUMS.txt:"
+          Get-Content -LiteralPath 'SHA256SUMS.txt')
+
+      - name: Upload manifest and checksums
+        if: needs.build.outputs.prerelease == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          files: |
+            ${{ runner.temp }}/dist/project.json
+            ${{ runner.temp }}/dist/SHA256SUMS.txt

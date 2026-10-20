@@ -586,13 +586,33 @@ namespace PclTestPlugin
                 object loader = fld == null ? null : fld.GetValue(null);
                 if (loader == null) { PluginApi.Log("[Test] !! DlClientListLoader missing"); return true; }
 
+                // IMPORTANT: LoadMinecraft_OnFinish() takes NO parameters, but
+                // PageLoaderInit wants Action(Of LoaderTask(Of TIn,TOut)).
+                // Delegate.CreateDelegate cannot bind those two shapes and
+                // silently returns null (with throwOnBindFailure:false), which
+                // leaves the page permanently in "loading" state - the content
+                // area stays collapsed and the download page looks empty.
+                // The official IL wraps it in a lambda; emulate that by building
+                // a delegate over a shim method that ignores its argument.
                 var onFinish = pageType.GetMethod("LoadMinecraft_OnFinish",
                     BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                Delegate finished = null;
-                if (onFinish != null)
+                if (onFinish == null)
                 {
-                    var actionType = typeof(Action<>).MakeGenericType(loader.GetType());
-                    finished = Delegate.CreateDelegate(actionType, __instance, onFinish, false);
+                    PluginApi.Log("[Test] !! LoadMinecraft_OnFinish missing");
+                    return true;
+                }
+                if (onFinish.GetParameters().Length != 0)
+                {
+                    PluginApi.Log("[Test] !! LoadMinecraft_OnFinish has parameters: unexpected shape");
+                    return true;
+                }
+
+                var actionType = typeof(Action<>).MakeGenericType(loader.GetType());
+                Delegate finished = BuildNoArgAction(__instance, onFinish, loader.GetType());
+                if (finished == null)
+                {
+                    PluginApi.Log("[Test] !! could not build finished callback delegate");
+                    return true;
                 }
 
                 var pli = FindPageLoaderInit(baseType, loader.GetType());
@@ -638,8 +658,32 @@ namespace PclTestPlugin
         public static int DispatchLastPackType = -1;
         public static string DispatchLastHelper;
 
-        private static MethodInfo FindPageLoaderInit(Type baseType, Type loaderType)
+        /// <summary>
+        /// Builds an <see cref="Action{T}"/> that ignores its argument and calls
+        /// the parameterless target method.
+        ///
+        /// Needed because <c>LoadMinecraft_OnFinish()</c> takes no parameters
+        /// while <c>PageLoaderInit</c> wants <c>Action(Of LoaderTask(Of TIn,TOut))</c>.
+        /// <see cref="Delegate.CreateDelegate(Type,object,MethodInfo,bool)"/> cannot
+        /// bind those shapes and returns null when asked not to throw - which
+        /// silently leaves the page stuck in its loading state (the download
+        /// page then renders as an empty area). The official IL wraps the call
+        /// in exactly this kind of adapter lambda.
+        /// </summary>
+        private static Delegate BuildNoArgAction(object target, MethodInfo noArgMethod, Type parameterType)
         {
+            // Compile: (param p) => { noArgMethod.Invoke(target, null); }
+            var p = System.Linq.Expressions.Expression.Parameter(parameterType, "task");
+            var call = System.Linq.Expressions.Expression.Call(
+                System.Linq.Expressions.Expression.Constant(target),
+                noArgMethod);
+            var body = System.Linq.Expressions.Expression.Block(call,
+                System.Linq.Expressions.Expression.Empty());
+            var lambdaType = typeof(Action<>).MakeGenericType(parameterType);
+            return System.Linq.Expressions.Expression.Lambda(lambdaType, body, p).Compile();
+        }
+
+        private static MethodInfo FindPageLoaderInit(Type baseType, Type loaderType)        {
             if (!loaderType.IsGenericType) return null;
             var ga = loaderType.GetGenericArguments();
             if (ga.Length != 2) return null;

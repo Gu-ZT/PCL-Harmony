@@ -11,11 +11,10 @@
     <Deterministic>true</Deterministic>
     <Optimize>true</Optimize>
     <NoWarn>CS0618</NoWarn>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
     <Product>PCL Harmony plugin loader</Product>
     <Company>PCL Harmony</Company>
+    <!-- Version / AssemblyVersion / FileVersion come from Directory.Build.props,
+         which reads them from project.json in the repo root. Do not set them here. -->
   </PropertyGroup>
   <ItemGroup>
     <!-- Lib.Harmony is referenced through NuGet so the build is machine independent.

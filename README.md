@@ -1,4 +1,4 @@
-﻿# PCL Harmony
+# PCL Harmony
 
 **为 [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL) 提供 Harmony 插件加载能力。**
 
@@ -77,6 +77,8 @@ PCL 把它的全部依赖（`MeloongCore`、`MeloongCore.Wpf`、`PCLCS`、`Newto
 ### 6. 项目结构
 
 ```
+project.json               版本清单（唯一版本来源：name / version / description）
+Directory.Build.props      把 project.json 的 version 注入所有项目的程序集版本
 src/loader/                加载器 C# 源码（net48，输出 PclHarmony.dll）
   Entry.cs                 AppDomainManager 入口，订阅 AssemblyLoad
   EmbeddedResolver.cs      内嵌依赖解析（PCL.Resources.resources）
@@ -85,11 +87,18 @@ src/loader/                加载器 C# 源码（net48，输出 PclHarmony.dll�
   IPlugin.cs               插件接口
   PluginApi.cs             暴露给插件的辅助 API
 src/testplugin/            示例插件 C# 源码（net48，输出 Test.dll）
-install.ps1                一键安装
+install.ps1                一键安装（省略 -TargetDir 时使用当前目录）
 uninstall.ps1              一键卸载
 build.ps1                  构建两个项目并刷新 dist\
 dist/                      构建产物（由 build.ps1 生成，不纳入版本控制）
 ```
+
+**版本号只在 `project.json` 里改**。`Directory.Build.props` 会读取其中的 `version` 并写入程序集版本，所以二进制、Release 标签和清单不会互相漂移；CI 还会在构建后从 `PclHarmony.dll` 读回版本做校验，不一致直接失败。
+
+发布正式版（推 `v*` 标签）时，除了 `PCL-Harmony.zip` 还会附加两个文件：
+
+- `project.json` —— 本次构建用的版本清单；
+- `SHA256SUMS.txt` —— 压缩包的 SHA-256 校验值。
 
 本仓库不包含 PCL 本体或其源码。
 
@@ -114,16 +123,16 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
    ```
 
 2. 关闭正在运行的 PCL。
-3. 打开 PowerShell，执行：
+3. 把压缩包解压到 **PCL 目录**（和 `Plain Craft Launcher 2.exe` 放一起），然后在该目录打开 PowerShell：
+
+   ```powershell
+   .\install.ps1
+   ```
+
+   `-TargetDir` 可省略，省略时就用当前目录。要装到别处则显式指定：
 
    ```powershell
    .\install.ps1 -TargetDir "D:\你的\PCL 目录"
-   ```
-
-   如果脚本就在 PCL 目录内，也可以省略 `-TargetDir`：
-
-   ```powershell
-   .\install.ps1 -TargetDir .
    ```
 
 `install.ps1` 会做三件事，且可以重复执行：
@@ -323,7 +332,7 @@ cd PCL-Harmony
 
 之后即可用 `dist\` 里的文件配合 `install.ps1 -TargetDir <PCL 目录>` 安装。
 
-推送到 `v*` 标签时，GitHub Actions 会自动构建并发布 Release（见 `.github/workflows/release.yml`）。
+推送到 `main` 会自动构建并发布一个 **预发布**（`v<version>-dev.<run_number>`）；推送 `v*` 标签则发布**正式版**，并额外附带 `project.json` 与 `SHA256SUMS.txt`。详见 `.github/workflows/ci.yml`。
 
 ---
 

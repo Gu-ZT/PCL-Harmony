@@ -30,6 +30,8 @@
 
 .PARAMETER TargetDir
     Directory that contains "Plain Craft Launcher 2.exe".
+    Optional: when omitted, the current working directory is used, so unzipping
+    the release into the launcher folder and running .\install.ps1 is enough.
 
 .PARAMETER Force
     Overwrite an existing PclHarmony.dll / 0Harmony.dll without prompting.
@@ -38,6 +40,10 @@
     Also copy the sample plugin (plugins\Test.dll from this archive) into the
     target plugins\ folder. Off by default: the sample changes launcher behaviour
     and only exists as a reference, so installing it is an explicit choice.
+
+.EXAMPLE
+    .\install.ps1
+    Installs into the current directory.
 
 .EXAMPLE
     .\install.ps1 -TargetDir "D:\PCL"
@@ -94,10 +100,12 @@ if ($null -eq $PayloadDir) {
 }
 
 # ---------------------------------------------------------------- preflight ---
+# -TargetDir is optional: with no argument, the current working directory is
+# used. This matches the common case of unzipping the release next to the
+# launcher and running .\install.ps1 with no arguments at all.
 if ([string]::IsNullOrWhiteSpace($TargetDir)) {
-    Write-Fail 'no target directory given.'
-    Write-Host  '[install] usage: .\install.ps1 -TargetDir "<folder containing Plain Craft Launcher 2.exe>"'
-    exit 1
+    $TargetDir = (Get-Location).ProviderPath
+    Write-Step "no -TargetDir given, using the current directory: $TargetDir"
 }
 
 $TargetDir = [System.IO.Path]::GetFullPath($TargetDir)
@@ -109,7 +117,7 @@ if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) {
 $ExePath = Join-Path $TargetDir $ExeName
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     Write-Fail "'$ExeName' not found in $TargetDir"
-    Write-Host  '[install] pass -TargetDir <folder containing the launcher executable>'
+    Write-Host  '[install] run this script from the launcher folder, or pass -TargetDir <that folder>'
     exit 1
 }
 Write-Step "target: $TargetDir"
