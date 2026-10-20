@@ -45,7 +45,7 @@ namespace PclTestPlugin
 
             string sel = null;
             try { sel = Environment.GetEnvironmentVariable("PCLHARMONY_TEST_SITES"); } catch { }
-            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4";
+            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5";
             PluginApi.Log("[Test] sites = " + sel);
             Func<int, bool> on = delegate (int n)
             {
@@ -59,6 +59,7 @@ namespace PclTestPlugin
             if (on(2) && PatchSite2_DispatchRedirect()) ok++;
             if (on(3) && PatchSite3_RealClientListLoader()) ok++;
             if (on(4) && PatchSite4_ShowCardMinecraft()) ok++;
+            if (on(5) && PatchSite5_InstallRow()) ok++;
 
             var names = new List<string>();
             foreach (var m in harmony.GetPatchedMethods())
@@ -727,6 +728,322 @@ namespace PclTestPlugin
             {
                 PluginApi.Log("[Test] site4 error: " + ex.GetType().Name + ": " + ex.Message);
             }
+        }
+
+        // =================================================================
+        // SITE 5 - resource-page version rows: "click to install"
+        //
+        // Official IL builds every version row with:
+        //     Stack.Children.Add(version.ToListItem(Save_Click, null, isBadDisplay))
+        // The original source has:
+        //     If Not RestrictMcDownload AndAlso TargetResourceType = ModPack Then
+        //         ...ToListItem(Install_Click, Save_Click, IsBadDisplay:=...)
+        //     Else
+        //         ...ToListItem(Save_Click, ...)
+        // RestrictMcDownload folded to True deleted the install-capable branch,
+        // so ModPack rows lost click-to-install and only offer "save as".
+        //
+        // Why this hooks ToListItem instead of the caller:
+        // InitializeStackResourceVersions is invoked LAZILY from MyCard's content
+        // builder, and it reads the version list from Stack.Tag, which it clears
+        // again before returning. Rebuilding its output from outside is fragile
+        // (the Tag/children timing does not line up), whereas ToListItem has
+        // exactly ONE call site in the whole assembly - the one we want to fix -
+        // and its first parameter is precisely the click handler we need to
+        // upgrade. Swapping that argument is both minimal and precise.
+        // =================================================================
+
+        private const int ResourceTypesModPack = 2;   // verified: ResourceProject maps /modpacks/ -> (ResourceTypes)2
+
+        public static int Site5Invoked;
+        public static int Site5Upgraded;
+        public static string Site5LastState = "(none)";
+        private static int _site5LastLoggedType = int.MinValue;
+
+        private static bool PatchSite5_InstallRow()
+        {
+            var versionType = T("PCL.ResourceVersion");
+            if (versionType == null) return false;
+
+            MethodInfo toListItem = null;
+            foreach (var m in versionType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (m.Name != "ToListItem") continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 3) { toListItem = m; break; }
+            }
+            if (toListItem == null) { PluginApi.Log("[Test] site5: ToListItem not found"); return false; }
+
+            return Apply(toListItem,
+                         new HarmonyMethod(P("Site5_ToListItem_Prefix")),
+                         null,
+                         null,
+                         "site5 ResourceVersion.ToListItem() [install-capable rows]");
+        }
+
+
+        /// <summary>
+        /// Runs before ResourceVersion.ToListItem.
+        ///
+        /// Parameter names must match the original method exactly - Harmony binds
+        /// by name, not by position. The real names are "ClickHandler" and
+        /// "SaveAsButtonHandler"; positional placeholders such as __0 do not exist
+        /// and would silently leave both arguments untouched.
+        ///
+        /// The decision uses the ResourceVersion instance itself
+        /// (ResourceVersion.ResourceType is a public field), not the active page:
+        /// the caller is lazily invoked and the page lookup proved unreliable.
+        /// Only ModPack rows are upgraded; every other resource type keeps its
+        /// original save-only behaviour.
+        /// </summary>
+        private static void Site5_ToListItem_Prefix(object __instance,
+                                                    ref object ClickHandler,
+                                                    ref object SaveAsButtonHandler)
+        {
+            try
+            {
+                Site5Invoked++;
+                if (Site5Invoked <= 3)
+                    PluginApi.Log("[Test] site5 prefix invoked #" + Site5Invoked
+                                  + " version=" + (__instance == null ? "(null)" : __instance.GetType().Name));
+
+                int resType = GetVersionResourceType(__instance);
+                Site5LastState = "resType=" + resType;
+
+                // Record every resource type seen in the wild. This is how the
+                // patch chain is proven live in a real UI even when the ModPack
+                // page itself does not render (see README limitations).
+                if (Site5Invoked <= 5 || resType != _site5LastLoggedType)
+                {
+                    _site5LastLoggedType = resType;
+                    PluginApi.Log("[Test] site5 ToListItem invoked #" + Site5Invoked
+                                  + " resourceType=" + resType
+                                  + " clickHandler="
+                                  + (ClickHandler == null ? "(null)" : ClickHandler.GetType().Name));
+                }
+                if (resType != ResourceTypesModPack) return;
+
+                // The page instance is exactly the target of the delegate PCL is
+                // passing in: it is Save_Click bound to the PageDownloadResourceDetail
+                // that is currently rendering. Using it avoids guessing at static
+                // fields, which are not populated in every host (and are null
+                // before the page has been created).
+                object page = GetDelegateTarget(ClickHandler) ?? GetDelegateTarget(SaveAsButtonHandler);
+                if (page == null) page = FindActiveResourceDetailPage();
+                if (page == null)
+                {
+                    Site5LastState = "resType=2 but no page instance";
+                    if (Site5Invoked <= 3)
+                        PluginApi.Log("[Test] site5: no page instance available, keeping save-only row");
+                    return;
+                }
+
+                Delegate install = BuildClickAdapter(page.GetType(), page, "Install_Click");
+                Delegate save = BuildClickAdapter(page.GetType(), page, "Save_Click");
+                if (install == null || save == null)
+                {
+                    Site5LastState = "adapter build failed";
+                    PluginApi.Log("[Test] site5: could not build click handlers, rows stay save-only");
+                    return;
+                }
+
+                ClickHandler = install;        // row click   -> Install_Click
+                SaveAsButtonHandler = save;    // save button -> Save_Click
+
+                Site5Upgraded++;
+                Site5LastState = "upgraded";
+                if (Site5Upgraded <= 3 || Site5Upgraded % 25 == 0)
+                    PluginApi.Log("[Test] site5 upgraded row #" + Site5Upgraded
+                                  + " to install+save (resourceType=" + resType + ")");
+            }
+            catch (Exception ex)
+            {
+                Site5LastState = "error: " + ex.GetType().Name;
+                PluginApi.Log("[Test] site5 prefix error (row left unchanged): "
+                              + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>Returns the delegate's target instance, or null.</summary>
+        private static object GetDelegateTarget(object candidate)
+        {
+            try
+            {
+                var d = candidate as Delegate;
+                return d == null ? null : d.Target;
+            }
+            catch { return null; }
+        }
+
+        // --- reflection over WPF Children collections -----------------------
+        private static object GetChildren(object element)
+        {
+            if (element == null) return null;
+            var p = element.GetType().GetProperty("Children");
+            return p == null ? null : p.GetValue(element, null);
+        }
+
+        private static int ChildrenCount(object children)
+        {
+            if (children == null) return -1;
+            var p = children.GetType().GetProperty("Count");
+            return p == null ? -1 : Convert.ToInt32(p.GetValue(children, null));
+        }
+
+        /// <summary>Reads ResourceVersion.ResourceType (public field).</summary>
+        private static int GetVersionResourceType(object version)
+        {
+            try
+            {
+                if (version == null) return -1;
+                var f = version.GetType().GetField("ResourceType",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (f == null) return -1;
+                object v = f.GetValue(version);
+                return v == null ? -1 : Convert.ToInt32(v);
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>
+        /// Returns the PageDownloadResourceDetail instance.
+        ///
+        /// It is a STATIC field on PCL.ModMain (ModMain.FrmDownloadResourceDetail),
+        /// not an instance field on FormMain - looking it up on FormMain silently
+        /// found nothing, which is why the upgrade never happened.
+        ///
+        /// Reaching this code at all already implies the resource detail page is
+        /// the one rendering (the only caller is that page's card content
+        /// builder), so no extra "is the page active" check is needed.
+        /// </summary>
+        private static object FindActiveResourceDetailPage()
+        {
+            try
+            {
+                var modMain = _target.GetType("PCL.ModMain", false);
+                if (modMain == null) { Site5LastState = "ModMain missing"; return null; }
+
+                var f = modMain.GetField("FrmDownloadResourceDetail",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (f != null)
+                {
+                    object detail = f.GetValue(null);
+                    if (detail != null) return detail;
+                    Site5LastState = "detail page null";
+                    return null;
+                }
+
+                // Fallback: any static field of that page type.
+                foreach (var sf in modMain.GetFields(BindingFlags.Public | BindingFlags.NonPublic
+                                                     | BindingFlags.Static))
+                {
+                    if (sf.FieldType == null) continue;
+                    if (!string.Equals(sf.FieldType.Name, "PageDownloadResourceDetail",
+                                       StringComparison.Ordinal)) continue;
+                    object v = sf.GetValue(null);
+                    if (v != null) return v;
+                }
+
+                Site5LastState = "detail page field missing";
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Site5LastState = "lookup error: " + ex.GetType().Name;
+                return null;
+            }
+        }
+
+        private static bool IsHandlerFor(object page, object handler, string methodName)
+        {
+            try
+            {
+                var d = handler as Delegate;
+                if (d == null) return false;
+                return d.Method != null
+                       && string.Equals(d.Method.Name, methodName, StringComparison.Ordinal)
+                       && ReferenceEquals(d.Target, page);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Builds <c>(object sender, MouseButtonEventArgs e) =&gt; handler((MyListItem)sender, e)</c>
+        /// for MyListItem.ClickEventHandler.
+        ///
+        /// Needed because Install_Click's first parameter is MyListItem, not
+        /// object: Delegate.CreateDelegate cannot bind that shape and returns
+        /// null when told not to throw - the same failure mode that once left
+        /// the download page blank.
+        /// </summary>
+        private static Delegate BuildClickAdapter(Type pageType, object page, string methodName)
+        {
+            var handler = pageType.GetMethod(methodName,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (handler == null)
+            {
+                PluginApi.Log("[Test] site5 !! " + methodName + " missing");
+                return null;
+            }
+
+            var ps = handler.GetParameters();
+            if (ps.Length != 2)
+            {
+                PluginApi.Log("[Test] site5 !! " + methodName + " has " + ps.Length + " params");
+                return null;
+            }
+
+            var myListItem = _target.GetType("PCL.MyListItem", false);
+            var mouseButtonEventArgs = typeof(System.Windows.Input.MouseButtonEventArgs);
+            if (myListItem == null) { PluginApi.Log("[Test] site5 !! PCL.MyListItem missing"); return null; }
+
+            var clickHandlerType = myListItem.GetNestedType("ClickEventHandler");
+            if (clickHandlerType == null) { PluginApi.Log("[Test] site5 !! ClickEventHandler missing"); return null; }
+
+            var senderParam = System.Linq.Expressions.Expression.Parameter(typeof(object), "sender");
+            var argsParam = System.Linq.Expressions.Expression.Parameter(mouseButtonEventArgs, "e");
+
+            var call = System.Linq.Expressions.Expression.Call(
+                System.Linq.Expressions.Expression.Constant(page),
+                handler,
+                System.Linq.Expressions.Expression.Convert(senderParam, ps[0].ParameterType),
+                System.Linq.Expressions.Expression.Convert(argsParam, ps[1].ParameterType));
+
+            var body = System.Linq.Expressions.Expression.Block(call,
+                System.Linq.Expressions.Expression.Empty());
+
+            var adapter = System.Linq.Expressions.Expression
+                .Lambda(clickHandlerType, body, senderParam, argsParam)
+                .Compile();
+
+            if (adapter == null) PluginApi.Log("[Test] site5 !! adapter for " + methodName + " is null");
+            return adapter;
+        }
+
+        /// <summary>
+        /// Reads the private ResourceTypes field; mirrors the official comparison
+        /// against ModPack.
+        /// </summary>
+        private static int GetTargetResourceType(object page)
+        {
+            try
+            {
+                var t = page.GetType();
+                while (t != null)
+                {
+                    var f = t.GetField("TargetResourceType",
+                        BindingFlags.NonPublic | BindingFlags.Public
+                        | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                    if (f != null)
+                    {
+                        object v = f.GetValue(page);
+                        return v == null ? -1 : Convert.ToInt32(v);
+                    }
+                    t = t.BaseType;
+                }
+            }
+            catch { }
+            return -1;
         }
 
         // =================================================================

@@ -56,6 +56,126 @@ namespace PclHarmony
                            + Prefixes.Length + " prefixes)");
         }
 
+        /// <summary>
+        /// Mirrors PCL's own Application.ExtractLibwebp(): writes the embedded
+        /// "libwebp64" payload next to the launcher as libwebp.dll and puts that
+        /// directory on the DLL search path, so Imazen.WebP can find its native
+        /// dependency.
+        ///
+        /// Best-effort: a failure here only degrades WebP image decoding, it must
+        /// never break startup.
+        /// </summary>
+        private static void PrepareNativeWebP(Assembly launcher)
+        {
+            try
+            {
+                // Target directory follows PCL's own logic: PathPure is where it
+                // writes helper files (launcher dir for ASCII paths, else %TEMP%\PCL).
+                string dir = ResolveNativeDirectory(launcher);
+                if (string.IsNullOrEmpty(dir)) { LoaderLog.Info("native: no target dir for libwebp"); return; }
+
+                System.IO.Directory.CreateDirectory(dir);
+                string dllPath = System.IO.Path.Combine(dir, "libwebp.dll");
+
+                // Extract only when missing or empty; identical to PCL's behaviour
+                // of rewriting on demand but avoids pointless churn.
+                bool need = true;
+                try
+                {
+                    var fi = new System.IO.FileInfo(dllPath);
+                    need = !fi.Exists || fi.Length == 0;
+                }
+                catch { }
+
+                if (need)
+                {
+                    byte[] payload = ReadResource(launcher, "libwebp64");
+                    if (payload == null || payload.Length == 0)
+                    {
+                        LoaderLog.Info("native: embedded libwebp64 payload not found");
+                        return;
+                    }
+                    System.IO.File.WriteAllBytes(dllPath, payload);
+                    LoaderLog.Info("native: wrote " + dllPath + " (" + payload.Length + " bytes)");
+                }
+
+                // Make the directory searchable for the native loader. PCL calls
+                // SetDllDirectoryA here; the managed equivalent is the same call.
+                try
+                {
+                    if (SetDllDirectory(dir))
+                        LoaderLog.Info("native: SetDllDirectory(\"" + dir + "\")");
+                    else
+                        LoaderLog.Info("native: SetDllDirectory failed, err="
+                                       + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                }
+                catch (Exception ex)
+                {
+                    LoaderLog.Info("native: SetDllDirectory threw: " + ex.GetType().Name);
+                }
+            }
+            catch (Exception ex)
+            {
+                LoaderLog.Info("native: libwebp preparation failed: " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        private static string ResolveNativeDirectory(Assembly launcher)
+        {
+            try
+            {
+                // Prefer the launcher's own directory when it is pure ASCII, which
+                // is exactly PCL's PathPure rule; otherwise fall back to %TEMP%\PCL.
+                string baseDir = null;
+                try { baseDir = System.IO.Path.GetDirectoryName(launcher.Location); } catch { }
+                if (string.IsNullOrEmpty(baseDir))
+                    baseDir = AppDomain.CurrentDomain.BaseDirectory;
+
+                if (!string.IsNullOrEmpty(baseDir) && IsAscii(baseDir))
+                    return System.IO.Path.Combine(baseDir, "PCL");
+
+                string temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "PCL");
+                if (IsAscii(temp)) return temp;
+
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static bool IsAscii(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] > 127) return false;
+            return true;
+        }
+
+        private static byte[] ReadResource(Assembly launcher, string key)
+        {
+            try
+            {
+                using (var stream = launcher.GetManifestResourceStream(ResourceName))
+                {
+                    if (stream == null) return null;
+                    using (var reader = new ResourceReader(stream))
+                    {
+                        foreach (System.Collections.DictionaryEntry entry in reader)
+                        {
+                            if (!(entry.Key is string k) || !string.Equals(k, key, StringComparison.Ordinal))
+                                continue;
+                            return entry.Value as byte[];
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32", CharSet = System.Runtime.InteropServices.CharSet.Ansi,
+            EntryPoint = "SetDllDirectoryA", ExactSpelling = true, SetLastError = true)]
+        private static extern bool SetDllDirectory(string lpPathName);
+
         private static string MatchPrefix(string simpleName)
         {
             if (string.IsNullOrEmpty(simpleName)) return null;
@@ -114,6 +234,17 @@ namespace PclHarmony
                                 Cache[requested] = loaded;
                                 LoaderLog.Info("resolver: served " + requested + " ("
                                                + bytes.Length + " bytes) for " + args.Name);
+
+                                // Imazen.WebP is a thin wrapper over the native libwebp.
+                                // PCL normally performs this preparation inside its own
+                                // resolver (Application.ExtractLibwebp) - but only when IT
+                                // resolves the assembly. We resolve it first, so unless we
+                                // do the same here PCL never calls SetDllDirectory and every
+                                // WebP image fails to decode with "运行环境存在问题", which
+                                // in turn stops some resource pages from rendering at all.
+                                if (string.Equals(prefix, "Imazen.WebP", StringComparison.Ordinal))
+                                    PrepareNativeWebP(launcher);
+
                                 return loaded;
                             }
                         }
