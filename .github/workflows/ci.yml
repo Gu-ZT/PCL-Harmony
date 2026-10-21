@@ -165,6 +165,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # The manifest (project.json) is read from the repository, so this job
+      # needs its own checkout - the build job's checkout is not shared.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download distribution archive
         uses: actions/download-artifact@v4
         with:
