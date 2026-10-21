@@ -132,7 +132,7 @@ This repository does not contain PCL itself or its source.
    ```
    install.ps1   uninstall.ps1   README.md
    PclHarmony.dll   0Harmony.dll
-   plugins\Example.dll
+   plugins\Example.dll   plugins\Example-Title.dll
    ```
 
 2. Close any running PCL.
@@ -153,20 +153,12 @@ This repository does not contain PCL itself or its source.
 | Step | Action |
 | --- | --- |
 | 1 | Copies `PclHarmony.dll` and `0Harmony.dll` next to the launcher executable |
-| 2 | Creates a `plugins\` folder next to the executable |
+| 2 | Creates an **empty** `plugins\` folder (skipped when it already exists) |
 | 3 | Writes / merges the three config parts described above into `Plain Craft Launcher 2.exe.config` |
 
 The script locates `PclHarmony.dll` and `0Harmony.dll` automatically: first next to itself (the layout of a release archive), then in `dist\PclHarmony\`, then in `src\loader\bin\Release\`.
 
-To also drop in the **sample plugin** (useful for confirming the loader works), add `-InstallSamplePlugin`:
-
-```powershell
-.\install.ps1 -TargetDir "D:\path\to\PCL" -InstallSamplePlugin
-```
-
-The sample is **not** installed by default: it alters launcher behaviour and is only a reference implementation, so enabling it is your call.
-
-That switch installs `Example.dll`; `Example-Title.dll` is a separate sample - copy it into `plugins\` yourself if you want it.
+**`install.ps1` only creates `plugins\`, it never puts a plugin in it.** The archive's own `plugins\` is just where the sample plugins come from - the script does not copy it across. To use a plugin, copy its DLL into the folder yourself.
 
 After installing, just start PCL. The loader writes `PclHarmony.log` into the PCL folder so you can confirm it attached.
 
@@ -343,7 +335,7 @@ cd PCL-Harmony
 
 1. `dotnet build src\loader\PclHarmony.csproj -c Release`
 2. `dotnet build src\sample-plugin\Example.csproj -c Release`
-3. refresh `dist\PclHarmony\PclHarmony.dll`, `dist\PclHarmony\0Harmony.dll` and `dist\plugins\Example.dll`
+3. refresh `dist\PclHarmony\PclHarmony.dll`, `dist\PclHarmony\0Harmony.dll` and `dist\plugins\Example.dll`, `dist\plugins\Example-Title.dll`
 4. verify the assembly name and version of all three artifacts
 
 You can then install from `dist\` with `install.ps1 -TargetDir <PCL folder>`.

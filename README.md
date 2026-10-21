@@ -131,7 +131,7 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
    ```
    install.ps1   uninstall.ps1   README.md
    PclHarmony.dll   0Harmony.dll
-   plugins\Example.dll
+   plugins\Example.dll   plugins\Example-Title.dll
    ```
 
 2. 关闭正在运行的 PCL。
@@ -152,20 +152,12 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
 | 步骤 | 动作 |
 | --- | --- |
 | 1 | 把 `PclHarmony.dll`、`0Harmony.dll` 复制到 PCL 可执行文件旁边 |
-| 2 | 在可执行文件旁创建 `plugins\` 目录 |
+| 2 | 创建**空的** `plugins\` 目录（已存在则跳过） |
 | 3 | 写入 / 合并 `Plain Craft Launcher 2.exe.config` 中前述三段配置 |
 
 脚本会自动定位 `PclHarmony.dll` 和 `0Harmony.dll`：先找脚本自身所在目录（Release 压缩包的布局），再找 `dist\PclHarmony\`，最后找 `src\loader\bin\Release\`。
 
-如果你还想把**示例插件**一并放进去（仅用于确认加载器工作正常），加 `-InstallSamplePlugin`：
-
-```powershell
-.\install.ps1 -TargetDir "D:\你的\PCL 目录" -InstallSamplePlugin
-```
-
-该开关会安装 `Example.dll`；`Example-Title.dll` 是另一个独立示例，需要就手动复制到 `plugins\`。
-
-示例插件默认**不安装**：它们会改变启动器行为，且只是参考实现，是否启用应由你决定。
+**`install.ps1` 只创建 `plugins\`，不往里放任何插件。** 压缩包自带的 `plugins\` 只是示例插件的来源，脚本不会把它复制到目标目录；要用哪个插件，手动把对应 DLL 复制进去即可。
 
 安装完成后直接启动 PCL 即可。加载器会在 PCL 目录下写一份 `PclHarmony.log`，可以从中确认它是否生效。
 
@@ -342,7 +334,7 @@ cd PCL-Harmony
 
 1. `dotnet build src\loader\PclHarmony.csproj -c Release`
 2. `dotnet build src\sample-plugin\Example.csproj -c Release`
-3. 把产物刷新到 `dist\PclHarmony\PclHarmony.dll`、`dist\PclHarmony\0Harmony.dll`、`dist\plugins\Example.dll`
+3. 把产物刷新到 `dist\PclHarmony\PclHarmony.dll`、`dist\PclHarmony\0Harmony.dll`、`dist\plugins\Example.dll`、`dist\plugins\Example-Title.dll`
 4. 校验三个产物的程序集名称与版本
 
 之后即可用 `dist\` 里的文件配合 `install.ps1 -TargetDir <PCL 目录>` 安装。

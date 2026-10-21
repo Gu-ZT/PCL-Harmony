@@ -178,7 +178,12 @@ jobs:
           # Loader DLLs at the archive ROOT.
           Copy-Item -LiteralPath 'dist/PclHarmony/PclHarmony.dll' -Destination $stage -Force
           Copy-Item -LiteralPath 'dist/PclHarmony/0Harmony.dll'   -Destination $stage -Force
-          Copy-Item -LiteralPath 'dist/plugins/Example.dll'          -Destination (Join-Path $stage 'plugins') -Force
+
+          # Sample plugins are shipped inside plugins\, but install.ps1 never
+          # touches that folder: they are manual copies, so every plugin built by
+          # build.ps1 has to be listed here explicitly.
+          Copy-Item -LiteralPath 'dist/plugins/Example.dll'       -Destination (Join-Path $stage 'plugins') -Force
+          Copy-Item -LiteralPath 'dist/plugins/Example-Title.dll' -Destination (Join-Path $stage 'plugins') -Force
 
           $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
@@ -195,7 +200,8 @@ jobs:
             $names = $arc.Entries | ForEach-Object { $_.FullName -replace '\\','/' }
             $required = @(
               'install.ps1','uninstall.ps1','PclHarmony.dll','0Harmony.dll',
-              'README.md','README.en_US.md','LICENSE','plugins/Example.dll'
+              'README.md','README.en_US.md','LICENSE',
+              'plugins/Example.dll','plugins/Example-Title.dll'
             )
             foreach ($r in $required) {
               if ($names -notcontains $r) { throw "archive is missing required entry at expected path: $r" }

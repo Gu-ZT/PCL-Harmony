@@ -6,9 +6,13 @@
     One-shot installer. Three independent steps, safe to re-run:
 
       1. copies PclHarmony.dll and 0Harmony.dll next to "Plain Craft Launcher 2.exe";
-      2. creates "plugins\" next to the executable (plugins are loaded from there);
+      2. creates an EMPTY "plugins\" next to the executable, as a drop point;
       3. patches "Plain Craft Launcher 2.exe.config" so the CLR instantiates our
          AppDomainManager ("PclHarmony.Entry") before the launcher's Main() runs.
+
+    Step 2 creates the folder only. No plugin DLL is ever copied into it - not
+    from this script's own plugins\ folder, not from anywhere else. Which plugins
+    run is the user's decision, so drop the DLLs in by hand.
 
     The config patch writes all three required parts and preserves unrelated
     content already present in the file:
@@ -36,11 +40,6 @@
 .PARAMETER Force
     Overwrite an existing PclHarmony.dll / 0Harmony.dll without prompting.
 
-.PARAMETER InstallSamplePlugin
-    Also copy the sample plugin (plugins\Example.dll from this archive) into the
-    target plugins\ folder. Off by default: the sample changes launcher behaviour
-    and only exists as a reference, so installing it is an explicit choice.
-
 .EXAMPLE
     .\install.ps1
     Installs into the current directory.
@@ -50,22 +49,14 @@
 
 .EXAMPLE
     .\install.ps1 -TargetDir "D:\PCL" -Force
-
-.EXAMPLE
-    .\install.ps1 -TargetDir "D:\PCL" -InstallSamplePlugin
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [string]$TargetDir,
 
-    [switch]$Force,
-
-    [switch]$InstallSamplePlugin
+    [switch]$Force
 )
-
-$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
 
 $ExeName         = 'Plain Craft Launcher 2.exe'
 $ConfigName      = 'Plain Craft Launcher 2.exe.config'
@@ -150,44 +141,16 @@ foreach ($item in @(@{ Src = 'PclHarmony.dll'; Dst = 'PclHarmony.dll' },
 }
 
 # --------------------------------------------------------------- plugins dir ---
+# Created empty, so there is an obvious place to drop plugin DLLs. Nothing is
+# copied into it: which plugins run is the user's decision, and the archive's
+# plugins\ folder is only a supply of samples.
 $PluginsDir = Join-Path $TargetDir 'plugins'
-if (-not (Test-Path -LiteralPath $PluginsDir)) {
-    $null = New-Item -ItemType Directory -Path $PluginsDir
-    Write-Step 'created plugins\'
-}
-else {
+if (Test-Path -LiteralPath $PluginsDir -PathType Container) {
     Write-Step 'plugins\ already exists'
 }
-
-# ------------------------------------------------------------ sample plugin ---
-if ($InstallSamplePlugin) {
-    # Release archive: plugins\Example.dll beside install.ps1.
-    # Repository checkout: dist\plugins\Example.dll (staged by build.ps1).
-    $sampleCandidates = @(
-        (Join-Path $PSScriptRoot 'plugins\Example.dll'),
-        (Join-Path $PSScriptRoot 'dist\plugins\Example.dll'),
-        (Join-Path $PSScriptRoot 'src\sample-plugin\bin\Release\Example.dll')
-    )
-    $sampleSource = $null
-    foreach ($candidate in $sampleCandidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $sampleSource = $candidate
-            break
-        }
-    }
-    if ($null -eq $sampleSource) {
-        Write-Fail 'sample plugin not found'
-        Write-Host  '[install] looked for: plugins\Example.dll, dist\plugins\Example.dll, src\sample-plugin\bin\Release\Example.dll'
-        exit 1
-    }
-    $sampleDest = Join-Path $PluginsDir 'Example.dll'
-    if ((Test-Path -LiteralPath $sampleDest) -and -not $Force) {
-        Write-Step 'already present: plugins\Example.dll (use -Force to overwrite)'
-    }
-    else {
-        Copy-Item -LiteralPath $sampleSource -Destination $sampleDest -Force
-        Write-Step 'copied sample plugin to plugins\Example.dll'
-    }
+else {
+    $null = New-Item -ItemType Directory -Path $PluginsDir -Force
+    Write-Step 'created empty plugins\'
 }
 
 # --------------------------------------------------------------- patch config ---
@@ -327,10 +290,7 @@ if (-not $ok) { exit 1 }
 
 Write-Step 'verification: 3/3 config parts present'
 Write-Step '  DLLs : PclHarmony.dll, 0Harmony.dll'
-Write-Step '  plugins\ exists'
-if (-not $InstallSamplePlugin) {
-    Write-Step '  sample plugin NOT installed (pass -InstallSamplePlugin to add plugins\Example.dll)'
-}
+Write-Step '  plugins\ : created empty, no plugin DLL copied (drop them in yourself)'
 Write-Host ''
 Write-Host '[install] Done. Start the launcher; the loader writes:'
 Write-Host "          $(Join-Path $TargetDir $LogName)"
