@@ -41,6 +41,11 @@ jobs:
       # Branch pushes produce a pre-release v<version>-dev.<run_number>;
       # v* tags produce a stable release v<version>. Same rule as the
       # reference dsh-launcher pipeline.
+      #
+      # The release pipeline also stamps the resolved version into the binaries
+      # (see "Stamp build version") and bumps project.json after a stable
+      # release (see the bump-version job), so a dev build carries its real
+      # version and the next cycle starts one patch ahead.
       - name: Resolve version
         id: version
         shell: pwsh
@@ -68,6 +73,36 @@ jobs:
           "tag=$tag"               | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "version=$version prerelease=$prerelease tag=$tag"
 
+      # Stamp the resolved version into the binaries. project.json holds the
+      # plain product version ("1.0.0"); a branch build is really
+      # "1.0.0-dev.<run>" and a tag build is the tag itself. Directory.Build.props
+      # lets PCL_HARMONY_VERSION win over project.json, so the shipped DLL
+      # reports the version it was actually built as instead of the manifest's.
+      # Release builds pass the tag version verbatim, which equals the manifest.
+      - name: Stamp build version
+        shell: pwsh
+        run: |
+          "PCL_HARMONY_VERSION=${{ steps.version.outputs.version }}" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "stamping version ${{ steps.version.outputs.version }}"
+
+      - name: Check release scripts parse
+        shell: pwsh
+        run: |
+          # ci/*.ps1 run only on a stable release, i.e. rarely. A syntax error in
+          # one of them would otherwise surface only on release day.
+          $files = Get-ChildItem -Path 'ci' -Filter '*.ps1' -File -ErrorAction SilentlyContinue
+          if (-not $files) { throw "no scripts found under ci/" }
+          foreach ($f in $files) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $f.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors -and $errors.Count -gt 0) {
+              throw "syntax error in $($f.Name): $($errors[0].Message)"
+            }
+            Write-Host "  ok: $($f.Name)"
+          }
+
       - name: Build and stage dist
         shell: pwsh
         run: ./build.ps1
@@ -85,15 +120,39 @@ jobs:
             Write-Host ("{0,-38} {1,10} bytes" -f $file, (Get-Item -LiteralPath $file).Length)
           }
 
-          # The shipped binary must carry the manifest version. This is the
-          # end-to-end proof that project.json really drives the build.
-          $base = [string](Get-Content -LiteralPath 'project.json' -Raw | ConvertFrom-Json).version
-          $asm  = [System.Reflection.AssemblyName]::GetAssemblyName(
-                    (Resolve-Path 'dist/PclHarmony/PclHarmony.dll')).Version.ToString()
-          Write-Host "manifest=$base  PclHarmony.dll=$asm"
-          if (-not $asm.StartsWith("$base.")) {
-            throw "version drift: project.json=$base but PclHarmony.dll reports $asm"
+          # The binary must carry the STAMPED version, not the bare manifest one.
+          # InformationalVersion keeps the full string incl. "-dev.<run>", so this
+          # is the end-to-end proof that the version really reaches the artifact.
+          $want = $env:PCL_HARMONY_VERSION
+          if ([string]::IsNullOrWhiteSpace($want)) { throw "PCL_HARMONY_VERSION was not set" }
+
+          $asm = [System.Reflection.AssemblyName]::GetAssemblyName(
+                   (Resolve-Path 'dist/PclHarmony/PclHarmony.dll'))
+          $core = ($want -split '-')[0]
+          Write-Host "expected=$want  AssemblyVersion=$($asm.Version)  core=$core"
+          if (-not $asm.Version.ToString().StartsWith("$core.")) {
+            throw "version drift: expected core $core but PclHarmony.dll reports $($asm.Version)"
           }
+
+          # InformationalVersion is where the pre-release suffix lives; read it
+          # without loading the assembly (Assembly.LoadFrom would lock the file
+          # and can pull in PCL types we do not want in this job).
+          $info = $null
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'dist/PclHarmony/PclHarmony.dll'))
+            $full  = [System.Reflection.Assembly]::ReflectionOnlyLoad($bytes)
+            $attr  = $full.GetCustomAttributesData() |
+                       Where-Object { $_.AttributeType.Name -eq 'AssemblyInformationalVersionAttribute' } |
+                       Select-Object -First 1
+            if ($attr) { $info = $attr.ConstructorArguments[0].Value }
+          } catch {
+            Write-Host "could not read InformationalVersion: $($_.Exception.Message)"
+          }
+          Write-Host "InformationalVersion=$info"
+          if ($info -and $info -ne $want -and -not $info.StartsWith("$want+")) {
+            throw "InformationalVersion '$info' does not match stamped version '$want'"
+          }
+          Write-Host "stamped version verified: $want"
 
       # Assemble the distribution. The archive is FLAT at the top level:
       #   install.ps1  uninstall.ps1  README.md  README.en_US.md  LICENSE
@@ -238,3 +297,58 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ env.RELEASE_FILES }}
+
+  # ----------------------------------------------------------- bump version ---
+  # After a STABLE release the manifest moves one patch ahead (1.0.0 -> 1.0.1)
+  # so the next plain push does not keep rebuilding an already-shipped version.
+  #
+  # This runs as its own job, after the release is published, on purpose: the
+  # release job attaches project.json to the stable release, and that attachment
+  # must describe the version being released (1.0.0), not the bumped one. Bumping
+  # before publishing would put 1.0.1 into the 1.0.0 release's manifest.
+  #
+  # Pre-releases never bump: dev/rc tags are cut from an unreleased version.
+  bump-version:
+    name: Bump manifest version
+    needs: [build, release]
+    if: github.event_name == 'push' && needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Must push the bump back to the branch the tag was cut from.
+          ref: ${{ github.event.repository.default_branch }}
+          # A token is required to push; the default GITHUB_TOKEN is fine because
+          # we grant contents: write at workflow level.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump project.json to next patch
+        shell: pwsh
+        run: ./ci/bump-version.ps1 '${{ needs.build.outputs.tag }}'
+
+      - name: Commit and push version bump
+        shell: pwsh
+        run: |
+          $next = [string](Get-Content -LiteralPath 'project.json' -Raw | ConvertFrom-Json).version
+
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          git add project.json
+          # git diff --cached --quiet exits 1 when there IS a staged change.
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "no version change to commit (already bumped)"
+            exit 0
+          }
+
+          # No [skip ci]: the bump lands on the default branch and SHOULD produce
+          # a fresh dev pre-release for the new version (1.0.1-dev.<run>). It
+          # cannot loop - this job only runs for stable tag pushes, and the bump
+          # commit is a plain branch push.
+          git commit -m "chore(release): bump version to $next"
+          git push
+
+          Write-Host "pushed version bump to $next"

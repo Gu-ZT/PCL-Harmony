@@ -6,31 +6,60 @@
     the release tag can never drift apart.
 
     Change the version ONLY in project.json.
+
+    CI override: the release pipeline resolves a fuller version than the
+    manifest carries - branch builds are stamped "1.0.0-dev.<run>" while the
+    manifest keeps "1.0.0". It passes that value through the
+    PCL_HARMONY_VERSION environment variable, which wins over project.json so a
+    dev artifact reports the version it was actually built as. Local builds have
+    no such variable and simply use the manifest.
   -->
 
   <PropertyGroup>
     <_ManifestPath>$(MSBuildThisFileDirectory)project.json</_ManifestPath>
+    <!-- Trimmed so a stray newline from a shell cannot end up in the assembly. -->
+    <_ProductVersionOverride Condition="'$(PCL_HARMONY_VERSION)' != ''">$(PCL_HARMONY_VERSION.Trim())</_ProductVersionOverride>
   </PropertyGroup>
 
   <Target Name="_ReadProductVersion" BeforeTargets="BeforeBuild;GenerateAssemblyInfo">
-    <Error Condition="!Exists('$(_ManifestPath)')"
+    <Error Condition="'$(_ProductVersionOverride)' == '' AND !Exists('$(_ManifestPath)')"
            Text="project.json not found at $(_ManifestPath)" />
 
     <PropertyGroup>
-      <_ManifestText>$([System.IO.File]::ReadAllText('$(_ManifestPath)'))</_ManifestText>
-      <_ProductVersion>$([System.Text.RegularExpressions.Regex]::Match($(_ManifestText), '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</_ProductVersion>
+      <_ManifestText Condition="'$(_ProductVersionOverride)' == ''">$([System.IO.File]::ReadAllText('$(_ManifestPath)'))</_ManifestText>
+      <_ManifestVersion Condition="'$(_ProductVersionOverride)' == ''">$([System.Text.RegularExpressions.Regex]::Match($(_ManifestText), '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</_ManifestVersion>
+      <_ProductVersion Condition="'$(_ProductVersionOverride)' != ''">$(_ProductVersionOverride)</_ProductVersion>
+      <_ProductVersion Condition="'$(_ProductVersionOverride)' == ''">$(_ManifestVersion)</_ProductVersion>
     </PropertyGroup>
 
     <Error Condition="'$(_ProductVersion)' == ''"
            Text="project.json has no 'version' field" />
 
+    <!--
+      AssemblyVersion / FileVersion are four-part numeric Win32 versions and
+      cannot carry a pre-release suffix, so they use the numeric core
+      ("1.0.0-dev.42" -> "1.0.0"). InformationalVersion keeps the full string,
+      which is where a dev build is visible.
+    -->
+    <PropertyGroup>
+      <_ProductVersionCore>$([System.Text.RegularExpressions.Regex]::Match('$(_ProductVersion)', '^\d+\.\d+\.\d+').Value)</_ProductVersionCore>
+    </PropertyGroup>
+
+    <Error Condition="'$(_ProductVersionCore)' == ''"
+           Text="version '$(_ProductVersion)' does not start with a numeric x.y.z core" />
+
     <PropertyGroup>
       <Version>$(_ProductVersion)</Version>
-      <FileVersion>$(_ProductVersion)</FileVersion>
-      <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(_ProductVersion)</AssemblyVersion>
+      <FileVersion>$(_ProductVersionCore)</FileVersion>
+      <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(_ProductVersionCore)</AssemblyVersion>
       <InformationalVersion>$(_ProductVersion)</InformationalVersion>
     </PropertyGroup>
 
-    <Message Importance="high" Text="version $(_ProductVersion) from project.json" />
+    <PropertyGroup>
+      <_VersionSource>project.json</_VersionSource>
+      <_VersionSource Condition="'$(_ProductVersionOverride)' != ''">CI override (PCL_HARMONY_VERSION)</_VersionSource>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="version $(_ProductVersion) from $(_VersionSource)" />
   </Target>
 </Project>
