@@ -98,6 +98,24 @@ Write-Step "refreshed dist\PclHarmony\PclHarmony.dll ($((Get-Item (Join-Path $Lo
 Write-Step "refreshed dist\PclHarmony\0Harmony.dll   ($((Get-Item (Join-Path $LoaderOut '0Harmony.dll')).Length) bytes)"
 Write-Step "refreshed dist\plugins\Test.dll          ($((Get-Item (Join-Path $PluginsOut 'Test.dll')).Length) bytes)"
 
+# ------------------------------------------------------------- stamped version ---
+# Directory.Build.props records the version it stamped into the loader assembly
+# in the project's obj folder. Surface it in dist/ so CI can assert on it without
+# re-reading the compiled DLL (loading it is unreliable on the Linux runner).
+$stampedPath = Join-Path $RepoRoot 'src\loader\obj\' `
+               | Join-Path -ChildPath $Configuration `
+               | Join-Path -ChildPath 'product-version.txt'
+
+if (Test-Path -LiteralPath $stampedPath) {
+    $stamped = (Get-Content -LiteralPath $stampedPath -Raw).Trim()
+    Set-Content -LiteralPath (Join-Path $LoaderOut 'product-version.txt') `
+                -Value $stamped -NoNewline -Encoding ascii
+    Write-Step "stamped version: $stamped"
+} else {
+    Write-Fail "stamp file missing: $stampedPath"
+    exit 1
+}
+
 # ------------------------------------------------------------------ sanity check ---
 if (-not $SkipTests) {
     Write-Step 'sanity check'

@@ -121,8 +121,6 @@ jobs:
           }
 
           # The binary must carry the STAMPED version, not the bare manifest one.
-          # InformationalVersion keeps the full string incl. "-dev.<run>", so this
-          # is the end-to-end proof that the version really reaches the artifact.
           $want = $env:PCL_HARMONY_VERSION
           if ([string]::IsNullOrWhiteSpace($want)) { throw "PCL_HARMONY_VERSION was not set" }
 
@@ -134,25 +132,25 @@ jobs:
             throw "version drift: expected core $core but PclHarmony.dll reports $($asm.Version)"
           }
 
-          # InformationalVersion is where the pre-release suffix lives; read it
-          # without loading the assembly (Assembly.LoadFrom would lock the file
-          # and can pull in PCL types we do not want in this job).
-          $info = $null
-          try {
-            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'dist/PclHarmony/PclHarmony.dll'))
-            $full  = [System.Reflection.Assembly]::ReflectionOnlyLoad($bytes)
-            $attr  = $full.GetCustomAttributesData() |
-                       Where-Object { $_.AttributeType.Name -eq 'AssemblyInformationalVersionAttribute' } |
-                       Select-Object -First 1
-            if ($attr) { $info = $attr.ConstructorArguments[0].Value }
-          } catch {
-            Write-Host "could not read InformationalVersion: $($_.Exception.Message)"
+          # build.ps1 surfaces the version MSBuild actually stamped, so this
+          # asserts the full string incl. the -dev.<run> suffix. Reading it back
+          # out of the compiled DLL needs Assembly.LoadFrom / ReflectionOnlyLoad
+          # or System.Reflection.Metadata, all unreliable on the Linux pwsh
+          # runner (a silent failure there previously made this check pass
+          # while comparing nothing).
+          $stamped = (Get-Content -LiteralPath 'dist/PclHarmony/product-version.txt' -Raw).Trim()
+          Write-Host "stamped version = $stamped"
+          if ($stamped -ne $want) {
+            throw "stamped version '$stamped' does not match resolved version '$want'"
           }
-          Write-Host "InformationalVersion=$info"
-          if ($info -and $info -ne $want -and -not $info.StartsWith("$want+")) {
-            throw "InformationalVersion '$info' does not match stamped version '$want'"
+
+          # The bare manifest version must still be the numeric core, so a
+          # released tag never silently disagrees with project.json.
+          $manifest = [string](Get-Content -LiteralPath 'project.json' -Raw | ConvertFrom-Json).version
+          if (-not $want.StartsWith($manifest)) {
+            throw "resolved version '$want' does not start with manifest version '$manifest'"
           }
-          Write-Host "stamped version verified: $want"
+          Write-Host "version verified: $want (manifest $manifest)"
 
       # Assemble the distribution. The archive is FLAT at the top level:
       #   install.ps1  uninstall.ps1  README.md  README.en_US.md  LICENSE

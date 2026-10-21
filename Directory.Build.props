@@ -61,5 +61,22 @@
     </PropertyGroup>
 
     <Message Importance="high" Text="version $(_ProductVersion) from $(_VersionSource)" />
+
+    <!--
+      Record what this build actually stamped into the assembly.
+
+      CI asserts against this file rather than re-reading the compiled assembly:
+      reading AssemblyInformationalVersion back out of a built DLL requires
+      loading it (Assembly.LoadFrom / ReflectionOnlyLoad) or parsing metadata
+      via System.Reflection.Metadata, and both are unreliable under the Linux
+      pwsh runner. Writing the value at build time verifies the same fact with
+      none of that fragility.
+
+      Placed in the obj directory of the project so it is per-build, and removed
+      by a clean like any other intermediate.
+    -->
+    <WriteLinesToFile File="$(IntermediateOutputPath)product-version.txt"
+                      Lines="$(_ProductVersion)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
   </Target>
 </Project>

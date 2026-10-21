@@ -93,12 +93,23 @@ build.ps1                  构建两个项目并刷新 dist\
 dist/                      构建产物（由 build.ps1 生成，不纳入版本控制）
 ```
 
-**版本号只在 `project.json` 里改**。`Directory.Build.props` 会读取其中的 `version` 并写入程序集版本，所以二进制、Release 标签和清单不会互相漂移；CI 还会在构建后从 `PclHarmony.dll` 读回版本做校验，不一致直接失败。
+**版本号只在 `project.json` 里改**。`Directory.Build.props` 会读取其中的 `version` 并写入程序集版本，所以二进制、Release 标签和清单不会互相漂移；CI 还会在构建后读回实际写入的版本做校验，不一致直接失败。
+
+版本在 CI 里的流转：
+
+| 事件 | 发布标签 | 产物里的版本 |
+| --- | --- | --- |
+| 推送到 `main` | 预发布 `v1.0.0-dev.<run>` | `1.0.0-dev.<run>`（**不是** `1.0.0`） |
+| 推 `v1.0.0` 标签 | 正式版 `v1.0.0` | `1.0.0` |
+
+`AssemblyVersion` / `FileVersion` 是四段数字，放不下 `-dev.<run>` 后缀，所以只取数字核心（`1.0.0`）；完整版本串在 `InformationalVersion` 里（例如 `1.0.0-dev.15+<commit>`）。要看一个产物到底是什么版本，读 `InformationalVersion` 而不是 `AssemblyVersion`。
 
 发布正式版（推 `v*` 标签）时，除了 `PCL-Harmony.zip` 还会附加两个文件：
 
 - `project.json` —— 本次构建用的版本清单；
 - `SHA256SUMS.txt` —— 压缩包的 SHA-256 校验值。
+
+正式版发布成功后，CI 会自动把 `project.json` 的版本推进到下一个 patch（`1.0.0` → `1.0.1`）并提交回 `main`，这样下一次普通推送不会重复构建已经发布的版本。预发布标签不会推进版本。该步骤是幂等的：只有当 `project.json` 仍等于刚发布的版本时才会 bump，因此重跑 job 或手动 bump 都不会重复推进。
 
 本仓库不包含 PCL 本体或其源码。
 

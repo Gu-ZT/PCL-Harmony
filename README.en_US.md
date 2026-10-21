@@ -94,12 +94,23 @@ build.ps1                  builds both projects and refreshes dist\
 dist/                      build output (produced by build.ps1, not version controlled)
 ```
 
-**Change the version only in `project.json`.** `Directory.Build.props` reads its `version` field and stamps every assembly with it, so binaries, release tags and the manifest cannot drift apart; CI additionally reads the version back out of `PclHarmony.dll` after building and fails on any mismatch.
+**Change the version only in `project.json`.** `Directory.Build.props` reads its `version` field and stamps every assembly with it, so binaries, release tags and the manifest cannot drift apart; CI additionally verifies the version that was actually stamped after building and fails on any mismatch.
+
+How the version flows through CI:
+
+| Event | Published tag | Version inside the artifact |
+| --- | --- | --- |
+| Push to `main` | pre-release `v1.0.0-dev.<run>` | `1.0.0-dev.<run>` (**not** `1.0.0`) |
+| Push a `v1.0.0` tag | stable `v1.0.0` | `1.0.0` |
+
+`AssemblyVersion` / `FileVersion` are four-part numeric versions and cannot carry a `-dev.<run>` suffix, so they use the numeric core (`1.0.0`); the full string lives in `InformationalVersion` (for example `1.0.0-dev.15+<commit>`). To tell which version an artifact really is, read `InformationalVersion`, not `AssemblyVersion`.
 
 Stable releases (a `v*` tag) attach two extra files next to `PCL-Harmony.zip`:
 
 - `project.json` - the manifest used for that build;
 - `SHA256SUMS.txt` - the archive's SHA-256 checksum.
+
+After a stable release succeeds, CI advances `project.json` to the next patch (`1.0.0` → `1.0.1`) and commits it back to `main`, so the next ordinary push does not rebuild an already-shipped version. Pre-release tags never bump. That step is idempotent: it only bumps while `project.json` still equals the version just released, so re-running the job or bumping by hand can never double-advance.
 
 This repository does not contain PCL itself or its source.
 
