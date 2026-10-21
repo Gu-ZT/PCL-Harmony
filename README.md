@@ -12,7 +12,7 @@
 
 PCL Harmony 是一个 **插件加载器**：它在 Plain Craft Launcher 2（下称 PCL）启动的过程中取得执行权，把 [Harmony](https://github.com/pardeike/Harmony) 注入到 PCL 的 AppDomain 内，从而让第三方插件可以在运行时对 PCL 的方法打补丁。
 
-仓库同时包含一个**示例插件**（`src/testplugin/`），用于演示插件如何接入。示例插件只作参考用途，本文不介绍它的具体功能。
+仓库同时包含一个**示例插件**（`src/sample-plugin/`），用于演示插件如何接入。示例插件只作参考用途，本文不介绍它的具体功能。
 
 ---
 
@@ -86,10 +86,11 @@ src/loader/                加载器 C# 源码（net48，输出 PclHarmony.dll�
   LoaderLog.cs             延迟初始化的低开销日志（PclHarmony.log）
   IPlugin.cs               插件接口
   PluginApi.cs             暴露给插件的辅助 API
-src/testplugin/            示例插件 C# 源码（net48，输出 Test.dll）
+src/sample-plugin/         示例插件 C# 源码（net48，输出 Example.dll）
+src/example-title/         示例插件：标题栏标记（net48，输出 Example-Title.dll）
 install.ps1                一键安装（省略 -TargetDir 时使用当前目录）
 uninstall.ps1              一键卸载
-build.ps1                  构建两个项目并刷新 dist\
+build.ps1                  构建三个项目并刷新 dist\
 dist/                      构建产物（由 build.ps1 生成，不纳入版本控制）
 ```
 
@@ -130,7 +131,7 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
    ```
    install.ps1   uninstall.ps1   README.md
    PclHarmony.dll   0Harmony.dll
-   plugins\Test.dll
+   plugins\Example.dll
    ```
 
 2. 关闭正在运行的 PCL。
@@ -162,7 +163,9 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
 .\install.ps1 -TargetDir "D:\你的\PCL 目录" -InstallSamplePlugin
 ```
 
-示例插件默认**不安装**：它会改变启动器行为，且只是参考实现，是否启用应由你决定。
+该开关会安装 `Example.dll`；`Example-Title.dll` 是另一个独立示例，需要就手动复制到 `plugins\`。
+
+示例插件默认**不安装**：它们会改变启动器行为，且只是参考实现，是否启用应由你决定。
 
 安装完成后直接启动 PCL 即可。加载器会在 PCL 目录下写一份 `PclHarmony.log`，可以从中确认它是否生效。
 
@@ -178,7 +181,8 @@ D:\你的\PCL 目录\
   0Harmony.dll
   PclHarmony.log
   plugins\
-    Test.dll            <- 示例插件
+    Example.dll            <- 示例插件
+    Example-Title.dll      <- 示例插件：标题栏标记
     你的插件.dll         <- 你自己的插件
 ```
 
@@ -320,7 +324,7 @@ namespace MyPlugin
 - **强烈建议用反射而非直接引用 PCL 类型**：PCL 不是可被广泛引用的库，直接编译期依赖它会让插件与具体版本强绑定。
 - **失败必须被隔离**：加载器会捕获每个插件的异常并撤销它半途打上的补丁，但插件自身仍应尽量在 `Load` 内做好防御。
 - **写日志用 `PluginApi.Log`**，便于用户把问题贴给你。
-- 可参考 `src/testplugin/` 里的示例插件实现。
+- 可参考 `src/sample-plugin/` 里的示例插件实现。
 
 ---
 
@@ -337,8 +341,8 @@ cd PCL-Harmony
 `build.ps1` 会：
 
 1. `dotnet build src\loader\PclHarmony.csproj -c Release`
-2. `dotnet build src\testplugin\Test.csproj -c Release`
-3. 把产物刷新到 `dist\PclHarmony\PclHarmony.dll`、`dist\PclHarmony\0Harmony.dll`、`dist\plugins\Test.dll`
+2. `dotnet build src\sample-plugin\Example.csproj -c Release`
+3. 把产物刷新到 `dist\PclHarmony\PclHarmony.dll`、`dist\PclHarmony\0Harmony.dll`、`dist\plugins\Example.dll`
 4. 校验三个产物的程序集名称与版本
 
 之后即可用 `dist\` 里的文件配合 `install.ps1 -TargetDir <PCL 目录>` 安装。
@@ -352,10 +356,9 @@ cd PCL-Harmony
 以下限制都是**真实存在**的，请在依赖本方案前先了解：
 
 1. **依赖 PCL 2.99.0.0 的精确方法签名与 IL 形态。** 本加载器与示例插件都是针对该版本逆向实现的。PCL 升级后，插件很可能需要重做。
-2. **示例插件中有一部分逻辑无法无条件工作。** 某些方法在官方的发布版本里被编译期折叠，正常的分支已被裁掉（例如某个方法的所有正常 `return` 都被删除，IL 里没有 `ret`，因此无法直接对其打补丁，只能改为重定向调用点）。这类重建出来的逻辑在**缺少 PCL 运行上下文**时会失败（例如在独立宿主中、没有已选游戏文件夹或加载器状态的情况下）；它在**正常的 UI 流程中可用**，但并非无条件可用。
-3. **资源页的“点击安装”需要先把版本卡片展开才会生效。** PCL 的资源详情页把版本按 MC 版本分组折叠成多张卡片，只有卡片内容被构建时才会生成版本行。卡片**多张时不会自动展开**（PCL 仅在只有 1 张卡片时自动展开），所以需要先点一下卡片标题；展开后该行即为“点击安装 + 另存为”。这是 PCL 自身的交互，补丁只是把行的点击行为换回安装。
-4. **插件以完全信任方式运行。** 插件在 PCL 的 AppDomain 内执行，拥有与 PCL 相同的权限，等同于任意代码执行。**只安装你信任的 DLL。**
-5. **这是运行时补丁方案，不是 PCL 的官方扩展机制。** 它依赖注入 `AppDomainManager` 并修改 `exe.config`；PCL 自身未提供插件接口。
+2. **示例插件只用于演示插件如何接入。** 它是参考实现，不是产品功能；本仓库不描述、也不承诺它的任何具体行为。
+3. **插件以完全信任方式运行。** 插件在 PCL 的 AppDomain 内执行，拥有与 PCL 相同的权限，等同于任意代码执行。**只安装你信任的 DLL。**
+4. **这是运行时补丁方案，不是 PCL 的官方扩展机制。** 它依赖注入 `AppDomainManager` 并修改 `exe.config`；PCL 自身未提供插件接口。
 
 ---
 

@@ -37,7 +37,7 @@
     Overwrite an existing PclHarmony.dll / 0Harmony.dll without prompting.
 
 .PARAMETER InstallSamplePlugin
-    Also copy the sample plugin (plugins\Test.dll from this archive) into the
+    Also copy the sample plugin (plugins\Example.dll from this archive) into the
     target plugins\ folder. Off by default: the sample changes launcher behaviour
     and only exists as a reference, so installing it is an explicit choice.
 
@@ -161,12 +161,12 @@ else {
 
 # ------------------------------------------------------------ sample plugin ---
 if ($InstallSamplePlugin) {
-    # Release archive: plugins\Test.dll beside install.ps1.
-    # Repository checkout: dist\plugins\Test.dll (staged by build.ps1).
+    # Release archive: plugins\Example.dll beside install.ps1.
+    # Repository checkout: dist\plugins\Example.dll (staged by build.ps1).
     $sampleCandidates = @(
-        (Join-Path $PSScriptRoot 'plugins\Test.dll'),
-        (Join-Path $PSScriptRoot 'dist\plugins\Test.dll'),
-        (Join-Path $PSScriptRoot 'src\testplugin\bin\Release\Test.dll')
+        (Join-Path $PSScriptRoot 'plugins\Example.dll'),
+        (Join-Path $PSScriptRoot 'dist\plugins\Example.dll'),
+        (Join-Path $PSScriptRoot 'src\sample-plugin\bin\Release\Example.dll')
     )
     $sampleSource = $null
     foreach ($candidate in $sampleCandidates) {
@@ -177,16 +177,16 @@ if ($InstallSamplePlugin) {
     }
     if ($null -eq $sampleSource) {
         Write-Fail 'sample plugin not found'
-        Write-Host  '[install] looked for: plugins\Test.dll, dist\plugins\Test.dll, src\testplugin\bin\Release\Test.dll'
+        Write-Host  '[install] looked for: plugins\Example.dll, dist\plugins\Example.dll, src\sample-plugin\bin\Release\Example.dll'
         exit 1
     }
-    $sampleDest = Join-Path $PluginsDir 'Test.dll'
+    $sampleDest = Join-Path $PluginsDir 'Example.dll'
     if ((Test-Path -LiteralPath $sampleDest) -and -not $Force) {
-        Write-Step 'already present: plugins\Test.dll (use -Force to overwrite)'
+        Write-Step 'already present: plugins\Example.dll (use -Force to overwrite)'
     }
     else {
         Copy-Item -LiteralPath $sampleSource -Destination $sampleDest -Force
-        Write-Step 'copied sample plugin to plugins\Test.dll'
+        Write-Step 'copied sample plugin to plugins\Example.dll'
     }
 }
 
@@ -329,7 +329,7 @@ Write-Step 'verification: 3/3 config parts present'
 Write-Step '  DLLs : PclHarmony.dll, 0Harmony.dll'
 Write-Step '  plugins\ exists'
 if (-not $InstallSamplePlugin) {
-    Write-Step '  sample plugin NOT installed (pass -InstallSamplePlugin to add plugins\Test.dll)'
+    Write-Step '  sample plugin NOT installed (pass -InstallSamplePlugin to add plugins\Example.dll)'
 }
 Write-Host ''
 Write-Host '[install] Done. Start the launcher; the loader writes:'

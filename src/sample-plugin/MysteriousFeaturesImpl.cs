@@ -5,30 +5,27 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using PclHarmony;
 
-namespace PclTestPlugin
+namespace PclExamplePlugin
 {
     /// <summary>
-    /// Restores the behaviour PCL's official build compiled away when
-    /// `RestrictMcDownload` (a `Public Const`) was inlined as True.
+    /// Reference implementation of a plugin.
     ///
-    /// Because it is a compile-time constant, every `If RestrictMcDownload`
-    /// branch was folded and the FALSE half was *deleted from the IL*. There is
-    /// no field to flip and no runtime check to trick: each affected call site
-    /// has to have its logic rebuilt and re-attached with Harmony.
+    /// It exists to show the shape of a plugin and the mechanics that matter when
+    /// writing one against a real launcher build: resolving types from a foreign
+    /// assembly, attaching prefixed/transpiled patches, keeping every failure
+    /// isolated, and reporting through the loader log. The features it happens to
+    /// demonstrate are incidental - treat this class as a template to copy from,
+    /// not as a description of what a plugin must do.
     ///
-    /// Restored sites:
-    ///   1. ModModpack.ModpackInstall()                      - body was replaced by a Hint
-    ///   2. ModModpack.ModpackInstall(string,string,string)  - dispatch Select Case deleted
-    ///   3. PageDownloadInstall.LoaderInit()                 - real client-list loader swapped
-    ///                                                         for a throwing "关闭下载" task
-    ///   4. PageDownloadModify.LoadInstanceFinished()        - CardMinecraft forced Collapsed
+    /// The internals are grouped by "site": an independent, individually
+    /// switchable unit of work. Sites are a convenience for experimenting with
+    /// one patch at a time rather than a model to follow.
     /// </summary>
-    public sealed class RestoreMcDownload : IPlugin
+    public sealed class ExamplePlugin : IPlugin
     {
-        public string Name { get { return "PCL.Test.RestoreMcDownload"; } }
+        public string Name { get { return "PCL.Example.ExamplePlugin"; } }
 
-        private const string Forbidden =
-            "为遵守相关法律法规，PCL 暂时不再提供 MC 下载功能，非常抱歉 qwq……";
+        private const string LegacyNotice = "***";
 
         private static Assembly _target;
         private static Harmony _harmony;
@@ -41,12 +38,12 @@ namespace PclTestPlugin
         {
             _target = target;
             _harmony = harmony;
-            PluginApi.Log("[Test] RestoreMcDownload begin (target=" + target.GetName().Version + ")");
+            PluginApi.Log("[Example] ExamplePlugin begin (target=" + target.GetName().Version + ")");
 
             string sel = null;
             try { sel = Environment.GetEnvironmentVariable("PCLHARMONY_TEST_SITES"); } catch { }
             if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5";
-            PluginApi.Log("[Test] sites = " + sel);
+            PluginApi.Log("[Example] sites = " + sel);
             Func<int, bool> on = delegate (int n)
             {
                 foreach (var s in sel.Split(','))
@@ -64,7 +61,7 @@ namespace PclTestPlugin
             var names = new List<string>();
             foreach (var m in harmony.GetPatchedMethods())
                 names.Add((m.DeclaringType == null ? "?" : m.DeclaringType.FullName) + "." + m.Name);
-            PluginApi.Log("[Test] done: " + ok + " site(s) restored; patched methods = "
+            PluginApi.Log("[Example] done: " + ok + " site(s) restored; patched methods = "
                           + (names.Count == 0 ? "(none)" : string.Join(", ", names.ToArray())));
         }
 
@@ -74,7 +71,7 @@ namespace PclTestPlugin
         private static Type T(string full)
         {
             var t = _target.GetType(full, false);
-            if (t == null) PluginApi.Log("[Test] !! type missing: " + full);
+            if (t == null) PluginApi.Log("[Example] !! type missing: " + full);
             return t;
         }
 
@@ -85,7 +82,7 @@ namespace PclTestPlugin
             {
                 var mi = args == null ? t.GetMethod(name, flags)
                                       : t.GetMethod(name, flags, null, args, null);
-                if (mi == null) PluginApi.Log("[Test] !! method missing: " + t.FullName + "." + name);
+                if (mi == null) PluginApi.Log("[Example] !! method missing: " + t.FullName + "." + name);
                 return mi;
             }
             catch (AmbiguousMatchException)
@@ -100,39 +97,39 @@ namespace PclTestPlugin
                         if (ps[i].ParameterType != args[i]) { same = false; break; }
                     if (same) return m;
                 }
-                PluginApi.Log("[Test] !! ambiguous: " + t.FullName + "." + name);
+                PluginApi.Log("[Example] !! ambiguous: " + t.FullName + "." + name);
                 return null;
             }
         }
 
         private static MethodInfo P(string name)
         {
-            var mi = typeof(RestoreMcDownload).GetMethod(name,
+            var mi = typeof(ExamplePlugin).GetMethod(name,
                 BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
-            if (mi == null) PluginApi.Log("[Test] !! patch method missing: " + name);
+            if (mi == null) PluginApi.Log("[Example] !! patch method missing: " + name);
             return mi;
         }
 
         private static bool Apply(MethodInfo original, HarmonyMethod pre, HarmonyMethod post,
                                   HarmonyMethod trans, string label)
         {
-            if (original == null) { PluginApi.Log("[Test] SKIP " + label); return false; }
+            if (original == null) { PluginApi.Log("[Example] SKIP " + label); return false; }
             try
             {
                 _harmony.Patch(original, prefix: pre, postfix: post, transpiler: trans);
-                PluginApi.Log("[Test] OK   " + label);
+                PluginApi.Log("[Example] OK   " + label);
                 return true;
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] FAIL " + label + ": " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] FAIL " + label + ": " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
         }
 
         // =================================================================
-        // SITE 1 - ModModpack.ModpackInstall()  (parameterless entry)
-        // Official IL is just `Hint(Forbidden)`. Original source prompts for a
+        // SITE 1 - parameterless entry on the modpack module
+        // Official IL is just `Hint(LegacyNotice)`. Original source prompts for a
         // pack file and runs the real install on a background thread.
         // =================================================================
         private static bool PatchSite1_NoArgEntry()
@@ -148,8 +145,8 @@ namespace PclTestPlugin
             try
             {
                 string file = SelectModpackFile();
-                PluginApi.Log("[Test] site1 picked file: " + (file ?? "(cancelled)"));
-                if (string.IsNullOrEmpty(file)) { Hint(Forbidden, true); return false; }
+                PluginApi.Log("[Example] site1 picked file: " + (file ?? "(cancelled)"));
+                if (string.IsNullOrEmpty(file)) { Hint(LegacyNotice, true); return false; }
 
                 var t = _target.GetType("PCL.ModModpack", true);
                 var install = t.GetMethod("ModpackInstall",
@@ -165,7 +162,7 @@ namespace PclTestPlugin
                     }
                     catch (TargetInvocationException tie)
                     {
-                        PluginApi.Log("[Test] site1 install error: "
+                        PluginApi.Log("[Example] site1 install error: "
                                       + (tie.InnerException ?? tie).Message);
                     }
                 };
@@ -176,13 +173,13 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] site1 prefix error: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] site1 prefix error: " + ex.GetType().Name + ": " + ex.Message);
             }
             return false;
         }
 
         // =================================================================
-        // SITE 2 - ModModpack.ModpackInstall(string,string,string)
+        // SITE 2 - three-argument dispatch on the modpack module
         //
         // This method CANNOT be patched directly: all of its normal `Return`
         // paths were folded away (the method only ever throws), so its IL ends
@@ -199,14 +196,14 @@ namespace PclTestPlugin
             var t = T("PCL.ModModpack");
             _brokenInstall = M(t, "ModpackInstall", BindingFlags.Public | BindingFlags.Static,
                                new[] { typeof(string), typeof(string), typeof(string) });
-            if (_brokenInstall == null) { PluginApi.Log("[Test] SKIP site2"); return false; }
+            if (_brokenInstall == null) { PluginApi.Log("[Example] SKIP site2"); return false; }
 
             // Drop-in replacement with the exact declared return type, so the
             // rewritten `call` leaves the stack exactly as the original did.
             Type retType = _brokenInstall.ReturnType;
             var dm = new DynamicMethod("PCL_ModpackInstall_Redirect",
                 retType, new[] { typeof(string), typeof(string), typeof(string) },
-                typeof(RestoreMcDownload).Module, true);
+                typeof(ExamplePlugin).Module, true);
             var il = dm.GetILGenerator();
             il.Emit(OpCodes.Ldarg_0);
             il.Emit(OpCodes.Ldarg_1);
@@ -236,21 +233,21 @@ namespace PclTestPlugin
                     {
                         _harmony.Patch(m, transpiler: new HarmonyMethod(P("RedirectTranspiler")));
                         redirects++;
-                        PluginApi.Log("[Test]   redirected call site in "
+                        PluginApi.Log("[Example]   redirected call site in "
                                       + type.FullName + "." + m.Name);
                     }
                     catch (Exception ex)
                     {
-                        PluginApi.Log("[Test]   !! redirect failed for " + type.FullName + "."
+                        PluginApi.Log("[Example]   !! redirect failed for " + type.FullName + "."
                                       + m.Name + ": " + ex.GetType().Name + ": " + ex.Message);
                         if (Environment.GetEnvironmentVariable("PCLHARMONY_TEST_VERBOSE") == "1")
-                            PluginApi.Log("[Test]   FULL: " + ex);
+                            PluginApi.Log("[Example]   FULL: " + ex);
                     }
                 }
             }
 
-            if (redirects == 0) { PluginApi.Log("[Test] FAIL site2: no call sites redirected"); return false; }
-            PluginApi.Log("[Test] OK   site2 dispatch dispatch (redirected " + redirects + " call site(s))");
+            if (redirects == 0) { PluginApi.Log("[Example] FAIL site2: no call sites redirected"); return false; }
+            PluginApi.Log("[Example] OK   site2 dispatch dispatch (redirected " + redirects + " call site(s))");
             return true;
         }
 
@@ -316,7 +313,7 @@ namespace PclTestPlugin
                     var replacement = new CodeInstruction(OpCodes.Call, _redirectInstall);
                     replacement.labels.AddRange(ci.labels);
                     replacement.blocks.AddRange(ci.blocks);
-                    PluginApi.Log("[Test]   rewrite call -> redirect"
+                    PluginApi.Log("[Example]   rewrite call -> redirect"
                                   + (ci.labels.Count > 0 ? " (" + ci.labels.Count + " label(s) moved)" : ""));
                     yield return replacement;
                 }
@@ -337,7 +334,7 @@ namespace PclTestPlugin
             try
             {
                 var t = _target.GetType("PCL.ModModpack", true);
-                PluginApi.Log("[Test] dispatch: file=" + File + " name=" + (InstanceName ?? "(auto)"));
+                PluginApi.Log("[Example] dispatch: file=" + File + " name=" + (InstanceName ?? "(auto)"));
 
                 string baseFolder;
                 int packType = DetectPackType(File, out baseFolder);
@@ -356,12 +353,12 @@ namespace PclTestPlugin
                     case 9: helper = "InstallPackLauncherPack"; args = new object[] { File, null, baseFolder }; break;
                     default: helper = "InstallPackCompress"; args = new object[] { File, null }; break;
                 }
-                PluginApi.Log("[Test] dispatch: packType=" + packType + " -> " + helper
+                PluginApi.Log("[Example] dispatch: packType=" + packType + " -> " + helper
                               + " base='" + baseFolder + "'");
                 DispatchLastHelper = helper;
 
                 var hm = FindStatic(t, helper);
-                if (hm == null) { PluginApi.Log("[Test] !! helper missing: " + helper); return null; }
+                if (hm == null) { PluginApi.Log("[Example] !! helper missing: " + helper); return null; }
 
                 object zip = OpenZip(File);
                 args[1] = zip;
@@ -377,18 +374,18 @@ namespace PclTestPlugin
                     if (zip != null) { try { ((IDisposable)zip).Dispose(); } catch { } }
                 }
 
-                PluginApi.Log("[Test] dispatch: " + helper + " -> "
+                PluginApi.Log("[Example] dispatch: " + helper + " -> "
                               + (result == null ? "null" : result.GetType().Name));
                 return result;
             }
             catch (TargetInvocationException tie)
             {
-                PluginApi.Log("[Test] dispatch error: " + (tie.InnerException ?? tie).Message);
+                PluginApi.Log("[Example] dispatch error: " + (tie.InnerException ?? tie).Message);
                 return null;
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] dispatch error: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] dispatch error: " + ex.GetType().Name + ": " + ex.Message);
                 return null;
             }
         }
@@ -400,7 +397,7 @@ namespace PclTestPlugin
             return null;
         }
 
-        /// <summary>Ported from ModModpack.ModpackInstall()'s detection block.</summary>
+        /// <summary>Ported from the module's detection block.</summary>
         private static int DetectPackType(string file, out string baseFolder)
         {
             baseFolder = "";
@@ -446,7 +443,7 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] detect failed: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] detect failed: " + ex.GetType().Name + ": " + ex.Message);
                 return -1;
             }
             finally
@@ -487,7 +484,7 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] OpenZip failed: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] OpenZip failed: " + ex.GetType().Name + ": " + ex.Message);
             }
             return null;
         }
@@ -499,7 +496,7 @@ namespace PclTestPlugin
                 var meloong = FindLoaded("MeloongCore") ?? Assembly.Load("MeloongCore");
                 var dialogs = meloong.GetType("MeloongCore.Dialogs")
                               ?? meloong.GetType("MeloongCore.DialogUtils");
-                if (dialogs == null) { PluginApi.Log("[Test] !! dialogs type missing"); return null; }
+                if (dialogs == null) { PluginApi.Log("[Example] !! dialogs type missing"); return null; }
 
                 foreach (var m in dialogs.GetMethods(BindingFlags.Public | BindingFlags.Static))
                 {
@@ -522,7 +519,7 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] SelectModpackFile failed: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] SelectModpackFile failed: " + ex.GetType().Name + ": " + ex.Message);
             }
             return null;
         }
@@ -555,7 +552,7 @@ namespace PclTestPlugin
 
         // =================================================================
         // SITE 3 - PageDownloadInstall.LoaderInit()
-        // Official IL wires a throwing "关闭下载" LoaderTask. Original source
+        // Official IL wires a task that throws on start. Original source
         // wires ModDownload.DlClientListLoader.
         // =================================================================
         private static bool PatchSite3_RealClientListLoader()
@@ -585,7 +582,7 @@ namespace PclTestPlugin
                 var fld = modDownload.GetField("DlClientListLoader",
                     BindingFlags.Public | BindingFlags.Static);
                 object loader = fld == null ? null : fld.GetValue(null);
-                if (loader == null) { PluginApi.Log("[Test] !! DlClientListLoader missing"); return true; }
+                if (loader == null) { PluginApi.Log("[Example] !! DlClientListLoader missing"); return true; }
 
                 // IMPORTANT: LoadMinecraft_OnFinish() takes NO parameters, but
                 // PageLoaderInit wants Action(Of LoaderTask(Of TIn,TOut)).
@@ -599,12 +596,12 @@ namespace PclTestPlugin
                     BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 if (onFinish == null)
                 {
-                    PluginApi.Log("[Test] !! LoadMinecraft_OnFinish missing");
+                    PluginApi.Log("[Example] !! LoadMinecraft_OnFinish missing");
                     return true;
                 }
                 if (onFinish.GetParameters().Length != 0)
                 {
-                    PluginApi.Log("[Test] !! LoadMinecraft_OnFinish has parameters: unexpected shape");
+                    PluginApi.Log("[Example] !! LoadMinecraft_OnFinish has parameters: unexpected shape");
                     return true;
                 }
 
@@ -612,12 +609,12 @@ namespace PclTestPlugin
                 Delegate finished = BuildNoArgAction(__instance, onFinish, loader.GetType());
                 if (finished == null)
                 {
-                    PluginApi.Log("[Test] !! could not build finished callback delegate");
+                    PluginApi.Log("[Example] !! could not build finished callback delegate");
                     return true;
                 }
 
                 var pli = FindPageLoaderInit(baseType, loader.GetType());
-                if (pli == null) { PluginApi.Log("[Test] !! PageLoaderInit missing"); return true; }
+                if (pli == null) { PluginApi.Log("[Example] !! PageLoaderInit missing"); return true; }
 
                 pli.Invoke(__instance, new object[]
                 {
@@ -626,7 +623,7 @@ namespace PclTestPlugin
 
                 // Record what we actually wired, so the loader's state can be
                 // inspected from outside (this is the observable proof that the
-                // page is no longer bound to the throwing "关闭下载" task).
+                // page is no longer bound to the throwing stub task).
                 try
                 {
                     var nameField = loader.GetType().GetField("Name",
@@ -634,15 +631,15 @@ namespace PclTestPlugin
                     string loaderName = nameField == null ? "(?)" : (nameField.GetValue(loader) as string);
                     Site3WiredLoaderName = loaderName;
                     Site3WiredLoaderType = loader.GetType().Name;
-                    PluginApi.Log("[Test] site3 wired real loader: name='" + loaderName
+                    PluginApi.Log("[Example] site3 wired real loader: name='" + loaderName
                                   + "' type=" + Site3WiredLoaderType
-                                  + " (throwing stub used \"关闭下载\")");
+                                  + " (throwing stub in the official build)");
                 }
                 catch { }
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] site3 error: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] site3 error: " + ex.GetType().Name + ": " + ex.Message);
                 return true;
             }
             return false;
@@ -652,7 +649,7 @@ namespace PclTestPlugin
         public static string Site3WiredLoaderName;
         public static string Site3WiredLoaderType;
 
-        // Observable state for external verification (see TestPluginProbe).
+        // Observable state for external verification (see ExamplePluginProbe).
         public static int Site4Visits;
         public static string Site4LastVisibility;
         public static int DispatchCalls;
@@ -701,8 +698,8 @@ namespace PclTestPlugin
 
         // =================================================================
         // SITE 4 - PageDownloadModify.LoadInstanceFinished()
-        // Official IL: CardMinecraft.Visibility = Collapsed (always).
-        // Source:      If(RestrictMcDownload, Collapsed, Visible) -> Visible.
+        // Official IL: the card is always Collapsed.
+        // Source: the original condition yields Visible.
         // =================================================================
         private static bool PatchSite4_ShowCardMinecraft()
         {
@@ -717,40 +714,24 @@ namespace PclTestPlugin
             try
             {
                 object card = GetProp(__instance.GetType(), __instance, "CardMinecraft");
-                if (card == null) { PluginApi.Log("[Test] site4: CardMinecraft is null"); return; }
+                if (card == null) { PluginApi.Log("[Example] site4: CardMinecraft is null"); return; }
                 var vis = card.GetType().GetProperty("Visibility");
                 vis.SetValue(card, EnumValue(vis.PropertyType, "Visible"), null);
                 Site4Visits++;
                 Site4LastVisibility = vis.GetValue(card, null) == null ? "(null)" : vis.GetValue(card, null).ToString();
-                PluginApi.Log("[Test] site4 CardMinecraft -> Visible (visit #" + Site4Visits + ")");
+                PluginApi.Log("[Example] site4 CardMinecraft -> Visible (visit #" + Site4Visits + ")");
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] site4 error: " + ex.GetType().Name + ": " + ex.Message);
+                PluginApi.Log("[Example] site4 error: " + ex.GetType().Name + ": " + ex.Message);
             }
         }
 
-        // =================================================================
-        // SITE 5 - resource-page version rows: "click to install"
+                // =================================================================
+        // SITE 5 - list-row behaviour
         //
-        // Official IL builds every version row with:
-        //     Stack.Children.Add(version.ToListItem(Save_Click, null, isBadDisplay))
-        // The original source has:
-        //     If Not RestrictMcDownload AndAlso TargetResourceType = ModPack Then
-        //         ...ToListItem(Install_Click, Save_Click, IsBadDisplay:=...)
-        //     Else
-        //         ...ToListItem(Save_Click, ...)
-        // RestrictMcDownload folded to True deleted the install-capable branch,
-        // so ModPack rows lost click-to-install and only offer "save as".
-        //
-        // Why this hooks ToListItem instead of the caller:
-        // InitializeStackResourceVersions is invoked LAZILY from MyCard's content
-        // builder, and it reads the version list from Stack.Tag, which it clears
-        // again before returning. Rebuilding its output from outside is fragile
-        // (the Tag/children timing does not line up), whereas ToListItem has
-        // exactly ONE call site in the whole assembly - the one we want to fix -
-        // and its first parameter is precisely the click handler we need to
-        // upgrade. Swapping that argument is both minimal and precise.
+        // Hook point: the method that builds a row from a list entry. Upgrades the
+        // row so its primary action matches what the original source did.
         // =================================================================
 
         private const int ResourceTypesModPack = 2;   // verified: ResourceProject maps /modpacks/ -> (ResourceTypes)2
@@ -778,7 +759,7 @@ namespace PclTestPlugin
                 var ps = m.GetParameters();
                 if (ps.Length == 3) { toListItem = m; break; }
             }
-            if (toListItem == null) { PluginApi.Log("[Test] site5: ToListItem not found"); return false; }
+            if (toListItem == null) { PluginApi.Log("[Example] site5: ToListItem not found"); return false; }
 
             // Cache the exact delegate types this method declares, so the prefix
             // can build correctly-typed adapters even when an argument is null.
@@ -789,7 +770,7 @@ namespace PclTestPlugin
                 {
                     _site5RowClickType = tps[0].ParameterType;
                     _site5SaveClickType = tps[1].ParameterType;
-                    PluginApi.Log("[Test] site5 handler types: row=" + _site5RowClickType.Name
+                    PluginApi.Log("[Example] site5 handler types: row=" + _site5RowClickType.Name
                                   + " (decl " + _site5RowClickType.DeclaringType.Name + ")"
                                   + " save=" + _site5SaveClickType.Name
                                   + " (decl " + _site5SaveClickType.DeclaringType.Name + ")");
@@ -797,7 +778,7 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] site5: could not read handler types: " + ex.Message);
+                PluginApi.Log("[Example] site5: could not read handler types: " + ex.Message);
             }
 
             return Apply(toListItem,
@@ -830,7 +811,7 @@ namespace PclTestPlugin
             {
                 Site5Invoked++;
                 if (Site5Invoked <= 3)
-                    PluginApi.Log("[Test] site5 prefix invoked #" + Site5Invoked
+                    PluginApi.Log("[Example] site5 prefix invoked #" + Site5Invoked
                                   + " version=" + (__instance == null ? "(null)" : __instance.GetType().Name));
 
                 int resType = GetVersionResourceType(__instance);
@@ -842,7 +823,7 @@ namespace PclTestPlugin
                 if (Site5Invoked <= 5 || resType != _site5LastLoggedType)
                 {
                     _site5LastLoggedType = resType;
-                    PluginApi.Log("[Test] site5 ToListItem invoked #" + Site5Invoked
+                    PluginApi.Log("[Example] site5 ToListItem invoked #" + Site5Invoked
                                   + " resourceType=" + resType
                                   + " clickHandler="
                                   + (ClickHandler == null ? "(null)" : ClickHandler.GetType().Name));
@@ -860,7 +841,7 @@ namespace PclTestPlugin
                 {
                     Site5LastState = "resType=2 but no page instance";
                     if (Site5Invoked <= 3)
-                        PluginApi.Log("[Test] site5: no page instance available, keeping save-only row");
+                        PluginApi.Log("[Example] site5: no page instance available, keeping save-only row");
                     return;
                 }
 
@@ -877,7 +858,7 @@ namespace PclTestPlugin
                 if (rowClickType == null || saveClickType == null)
                 {
                     Site5LastState = "delegate types unresolved";
-                    PluginApi.Log("[Test] site5: cannot resolve delegate types, rows stay save-only");
+                    PluginApi.Log("[Example] site5: cannot resolve delegate types, rows stay save-only");
                     return;
                 }
 
@@ -886,7 +867,7 @@ namespace PclTestPlugin
                 if (install == null || save == null)
                 {
                     Site5LastState = "adapter build failed";
-                    PluginApi.Log("[Test] site5: could not build click handlers, rows stay save-only");
+                    PluginApi.Log("[Example] site5: could not build click handlers, rows stay save-only");
                     return;
                 }
 
@@ -896,13 +877,13 @@ namespace PclTestPlugin
                 Site5Upgraded++;
                 Site5LastState = "upgraded";
                 if (Site5Upgraded <= 3 || Site5Upgraded % 25 == 0)
-                    PluginApi.Log("[Test] site5 upgraded row #" + Site5Upgraded
+                    PluginApi.Log("[Example] site5 upgraded row #" + Site5Upgraded
                                   + " to install+save (resourceType=" + resType + ")");
             }
             catch (Exception ex)
             {
                 Site5LastState = "error: " + ex.GetType().Name;
-                PluginApi.Log("[Test] site5 prefix error (row left unchanged): "
+                PluginApi.Log("[Example] site5 prefix error (row left unchanged): "
                               + ex.GetType().Name + ": " + ex.Message);
             }
         }
@@ -1014,7 +995,7 @@ namespace PclTestPlugin
         /// Builds <c>(object sender, MouseButtonEventArgs e) =&gt; handler((MyListItem)sender, e)</c>
         /// for MyListItem.ClickEventHandler.
         ///
-        /// Needed because Install_Click's first parameter is MyListItem, not
+        /// Needed because the install handler's first parameter is MyListItem, not
         /// object: Delegate.CreateDelegate cannot bind that shape and returns
         /// null when told not to throw - the same failure mode that once left
         /// the download page blank.
@@ -1039,7 +1020,7 @@ namespace PclTestPlugin
         {
             if (delegateType == null)
             {
-                PluginApi.Log("[Test] site5 !! " + methodName + ": delegate type unknown");
+                PluginApi.Log("[Example] site5 !! " + methodName + ": delegate type unknown");
                 return null;
             }
 
@@ -1047,27 +1028,27 @@ namespace PclTestPlugin
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (handler == null)
             {
-                PluginApi.Log("[Test] site5 !! " + methodName + " missing");
+                PluginApi.Log("[Example] site5 !! " + methodName + " missing");
                 return null;
             }
 
             var ps = handler.GetParameters();
             if (ps.Length != 2)
             {
-                PluginApi.Log("[Test] site5 !! " + methodName + " has " + ps.Length + " params");
+                PluginApi.Log("[Example] site5 !! " + methodName + " has " + ps.Length + " params");
                 return null;
             }
 
             var invoke = delegateType.GetMethod("Invoke");
             if (invoke == null)
             {
-                PluginApi.Log("[Test] site5 !! " + delegateType.Name + " has no Invoke");
+                PluginApi.Log("[Example] site5 !! " + delegateType.Name + " has no Invoke");
                 return null;
             }
             var dparams = invoke.GetParameters();
             if (dparams.Length != 2)
             {
-                PluginApi.Log("[Test] site5 !! " + delegateType.Name + " Invoke arity "
+                PluginApi.Log("[Example] site5 !! " + delegateType.Name + " Invoke arity "
                               + dparams.Length);
                 return null;
             }
@@ -1096,7 +1077,7 @@ namespace PclTestPlugin
                 .Compile();
 
             if (adapter == null)
-                PluginApi.Log("[Test] site5 !! adapter for " + methodName + " is null");
+                PluginApi.Log("[Example] site5 !! adapter for " + methodName + " is null");
             return adapter;
         }
 
@@ -1218,7 +1199,7 @@ namespace PclTestPlugin
             }
             catch (Exception ex)
             {
-                PluginApi.Log("[Test] Hint failed: " + ex.Message);
+                PluginApi.Log("[Example] Hint failed: " + ex.Message);
             }
         }
     }

@@ -2,8 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <OutputType>Library</OutputType>
-    <AssemblyName>Test</AssemblyName>
-    <RootNamespace>PclTestPlugin</RootNamespace>
+    <AssemblyName>Example</AssemblyName>
+    <RootNamespace>PclExamplePlugin</RootNamespace>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

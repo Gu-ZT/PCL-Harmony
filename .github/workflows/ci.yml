@@ -113,7 +113,7 @@ jobs:
           $expected = @(
             'dist/PclHarmony/PclHarmony.dll',
             'dist/PclHarmony/0Harmony.dll',
-            'dist/plugins/Test.dll'
+            'dist/plugins/Example.dll'
           )
           foreach ($file in $expected) {
             if (-not (Test-Path -LiteralPath $file)) { throw "missing build output: $file" }
@@ -154,7 +154,7 @@ jobs:
 
       # Assemble the distribution. The archive is FLAT at the top level:
       #   install.ps1  uninstall.ps1  README.md  README.en_US.md  LICENSE
-      #   PclHarmony.dll  0Harmony.dll  plugins/Test.dll
+      #   PclHarmony.dll  0Harmony.dll  plugins/Example.dll
       # so that unzipping it next to the launcher gives install.ps1 everything
       # it needs, and the two DLLs sit at the archive root as users expect.
       - name: Assemble distribution archive
@@ -178,7 +178,7 @@ jobs:
           # Loader DLLs at the archive ROOT.
           Copy-Item -LiteralPath 'dist/PclHarmony/PclHarmony.dll' -Destination $stage -Force
           Copy-Item -LiteralPath 'dist/PclHarmony/0Harmony.dll'   -Destination $stage -Force
-          Copy-Item -LiteralPath 'dist/plugins/Test.dll'          -Destination (Join-Path $stage 'plugins') -Force
+          Copy-Item -LiteralPath 'dist/plugins/Example.dll'          -Destination (Join-Path $stage 'plugins') -Force
 
           $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
@@ -195,7 +195,7 @@ jobs:
             $names = $arc.Entries | ForEach-Object { $_.FullName -replace '\\','/' }
             $required = @(
               'install.ps1','uninstall.ps1','PclHarmony.dll','0Harmony.dll',
-              'README.md','README.en_US.md','LICENSE','plugins/Test.dll'
+              'README.md','README.en_US.md','LICENSE','plugins/Example.dll'
             )
             foreach ($r in $required) {
               if ($names -notcontains $r) { throw "archive is missing required entry at expected path: $r" }

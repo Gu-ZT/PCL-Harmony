@@ -12,7 +12,7 @@
 
 PCL Harmony is a **plugin loader**: it takes control while Plain Craft Launcher 2 ("PCL") starts up and injects [Harmony](https://github.com/pardeike/Harmony) into PCL's AppDomain, so that third-party plugins can patch PCL methods at runtime.
 
-The repository also contains a **sample plugin** (`src/testplugin/`) that demonstrates how a plugin plugs in. The sample is reference material only; this document does not describe what it does.
+The repository also contains a **sample plugin** (`src/sample-plugin/`) that demonstrates how a plugin plugs in. The sample is reference material only; this document does not describe what it does.
 
 ---
 
@@ -87,10 +87,11 @@ src/loader/                loader C# sources (net48 -> PclHarmony.dll)
   LoaderLog.cs             lazily initialised, low-cost logging (PclHarmony.log)
   IPlugin.cs               plugin interface
   PluginApi.cs             helper API exposed to plugins
-src/testplugin/            sample plugin C# sources (net48 -> Test.dll)
+src/sample-plugin/            sample plugin C# sources (net48 -> Example.dll)
+src/example-title/             sample plugin: title-bar badge (net48 -> Example-Title.dll)
 install.ps1                one-shot installer (defaults to the current directory)
 uninstall.ps1              one-shot uninstaller
-build.ps1                  builds both projects and refreshes dist\
+build.ps1                  builds three projects and refreshes dist\
 dist/                      build output (produced by build.ps1, not version controlled)
 ```
 
@@ -131,7 +132,7 @@ This repository does not contain PCL itself or its source.
    ```
    install.ps1   uninstall.ps1   README.md
    PclHarmony.dll   0Harmony.dll
-   plugins\Test.dll
+   plugins\Example.dll
    ```
 
 2. Close any running PCL.
@@ -165,6 +166,8 @@ To also drop in the **sample plugin** (useful for confirming the loader works), 
 
 The sample is **not** installed by default: it alters launcher behaviour and is only a reference implementation, so enabling it is your call.
 
+That switch installs `Example.dll`; `Example-Title.dll` is a separate sample - copy it into `plugins\` yourself if you want it.
+
 After installing, just start PCL. The loader writes `PclHarmony.log` into the PCL folder so you can confirm it attached.
 
 ### Placing plugins
@@ -179,7 +182,8 @@ D:\path\to\PCL\
   0Harmony.dll
   PclHarmony.log
   plugins\
-    Test.dll            <- sample plugin
+    Example.dll            <- sample plugin
+  Example-Title.dll      <- sample plugin: title-bar badge
     YourPlugin.dll      <- your own plugin
 ```
 
@@ -321,7 +325,7 @@ namespace MyPlugin
 - **Prefer reflection over referencing PCL types directly.** PCL is not a library meant for wide referencing; a compile-time dependency pins your plugin to one exact build.
 - **Failures must stay isolated.** The loader catches each plugin's exception and reverts its half-applied patches, but a plugin should still defend itself inside `Load`.
 - **Log through `PluginApi.Log`** so users can paste the output back to you.
-- See the sample plugin under `src/testplugin/` for a complete implementation.
+- See the sample plugin under `src/sample-plugin/` for a complete implementation.
 
 ---
 
@@ -338,8 +342,8 @@ cd PCL-Harmony
 `build.ps1` will:
 
 1. `dotnet build src\loader\PclHarmony.csproj -c Release`
-2. `dotnet build src\testplugin\Test.csproj -c Release`
-3. refresh `dist\PclHarmony\PclHarmony.dll`, `dist\PclHarmony\0Harmony.dll` and `dist\plugins\Test.dll`
+2. `dotnet build src\sample-plugin\Example.csproj -c Release`
+3. refresh `dist\PclHarmony\PclHarmony.dll`, `dist\PclHarmony\0Harmony.dll` and `dist\plugins\Example.dll`
 4. verify the assembly name and version of all three artifacts
 
 You can then install from `dist\` with `install.ps1 -TargetDir <PCL folder>`.
@@ -353,10 +357,9 @@ Pushing to `main` builds and publishes a **pre-release** (`v<version>-dev.<run_n
 These are **real** constraints; understand them before relying on this project:
 
 1. **Tied to the exact method signatures and IL of PCL 2.99.0.0.** Both the loader and the sample plugin were written against that version. After a PCL upgrade, plugins will likely need rework.
-2. **Part of the sample plugin's logic cannot work unconditionally.** Some methods in the official build were folded at compile time and their normal branches were deleted (for example a method whose every normal `return` was removed, leaving no `ret` in the IL — such a method cannot be patched directly and call sites must be redirected instead). Logic rebuilt that way **fails when PCL's runtime context is missing** (for instance in a standalone host, or without a selected game folder / loader state); it **works in the normal UI flow**, but it is not unconditionally available.
-3. **"Click to install" on the resource page only takes effect once the version card is expanded.** PCL's resource detail page groups versions by MC version into collapsible cards, and version rows are only created when a card's content is built. With **more than one card present PCL does not auto-expand** (it only auto-expands when exactly one card exists), so the card title must be clicked first; after expanding, the row offers "click to install" plus "save as". This is PCL's own interaction model — the patch only swaps the row's click behaviour back to install.
-4. **Plugins run with full trust.** A plugin executes inside PCL's AppDomain with PCL's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
-5. **This is a runtime patch, not an official extension mechanism.** It relies on injecting an `AppDomainManager` and editing `exe.config`; PCL itself provides no plugin interface.
+2. **The sample plugin exists only to show how a plugin plugs in.** It is reference material, not a product feature; this repository neither documents nor promises any specific behaviour of it.
+3. **Plugins run with full trust.** A plugin executes inside PCL's AppDomain with PCL's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
+4. **This is a runtime patch, not an official extension mechanism.** It relies on injecting an `AppDomainManager` and editing `exe.config`; PCL itself provides no plugin interface.
 
 ---
 
