@@ -205,7 +205,7 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "{0}  {1}" -f $hash, $zip | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
           Write-Host "SHA256SUMS.txt:"
-          Get-Content -LiteralPath 'SHA256SUMS.txt')
+          Get-Content -LiteralPath 'SHA256SUMS.txt'
 
       - name: Upload manifest and checksums
         if: needs.build.outputs.prerelease == 'false'
