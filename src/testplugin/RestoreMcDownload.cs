@@ -760,6 +760,12 @@ namespace PclTestPlugin
         public static string Site5LastState = "(none)";
         private static int _site5LastLoggedType = int.MinValue;
 
+        // Delegate types declared by ToListItem's two handler parameters.
+        // Cached when the patch is installed so the prefix can build a correct
+        // adapter even when a parameter arrives as null.
+        private static Type _site5RowClickType;    // PCL.MyListItem/ClickEventHandler
+        private static Type _site5SaveClickType;   // PCL.MyIconButton/ClickEventHandler
+
         private static bool PatchSite5_InstallRow()
         {
             var versionType = T("PCL.ResourceVersion");
@@ -773,6 +779,26 @@ namespace PclTestPlugin
                 if (ps.Length == 3) { toListItem = m; break; }
             }
             if (toListItem == null) { PluginApi.Log("[Test] site5: ToListItem not found"); return false; }
+
+            // Cache the exact delegate types this method declares, so the prefix
+            // can build correctly-typed adapters even when an argument is null.
+            try
+            {
+                var tps = toListItem.GetParameters();
+                if (tps.Length == 3)
+                {
+                    _site5RowClickType = tps[0].ParameterType;
+                    _site5SaveClickType = tps[1].ParameterType;
+                    PluginApi.Log("[Test] site5 handler types: row=" + _site5RowClickType.Name
+                                  + " (decl " + _site5RowClickType.DeclaringType.Name + ")"
+                                  + " save=" + _site5SaveClickType.Name
+                                  + " (decl " + _site5SaveClickType.DeclaringType.Name + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                PluginApi.Log("[Test] site5: could not read handler types: " + ex.Message);
+            }
 
             return Apply(toListItem,
                          new HarmonyMethod(P("Site5_ToListItem_Prefix")),
@@ -838,8 +864,25 @@ namespace PclTestPlugin
                     return;
                 }
 
-                Delegate install = BuildClickAdapter(page.GetType(), page, "Install_Click");
-                Delegate save = BuildClickAdapter(page.GetType(), page, "Save_Click");
+                // The two parameters are DIFFERENT delegate types:
+                //   ClickHandler        : PCL.MyListItem/ClickEventHandler
+                //   SaveAsButtonHandler : PCL.MyIconButton/ClickEventHandler
+                // Derive them from the currently declared parameter types, which is
+                // always correct regardless of which assembly version is loaded.
+                Type rowClickType = ClickHandler == null ? null : ClickHandler.GetType();
+                if (rowClickType == null) rowClickType = _site5RowClickType;
+                Type saveClickType = SaveAsButtonHandler == null ? null : SaveAsButtonHandler.GetType();
+                if (saveClickType == null) saveClickType = _site5SaveClickType;
+
+                if (rowClickType == null || saveClickType == null)
+                {
+                    Site5LastState = "delegate types unresolved";
+                    PluginApi.Log("[Test] site5: cannot resolve delegate types, rows stay save-only");
+                    return;
+                }
+
+                Delegate install = BuildClickAdapter(page.GetType(), page, "Install_Click", rowClickType);
+                Delegate save = BuildClickAdapter(page.GetType(), page, "Save_Click", saveClickType);
                 if (install == null || save == null)
                 {
                     Site5LastState = "adapter build failed";
@@ -976,8 +1019,30 @@ namespace PclTestPlugin
         /// null when told not to throw - the same failure mode that once left
         /// the download page blank.
         /// </summary>
-        private static Delegate BuildClickAdapter(Type pageType, object page, string methodName)
+        /// <summary>
+        /// Builds a delegate of <paramref name="delegateType"/> that forwards to
+        /// <paramref name="methodName"/> on <paramref name="page"/>.
+        ///
+        /// <paramref name="delegateType"/> must be the EXACT nested delegate type
+        /// the target parameter declares:
+        ///   ToListItem param 0 is PCL.MyListItem/ClickEventHandler
+        ///   ToListItem param 1 is PCL.MyIconButton/ClickEventHandler
+        /// Building one for the other produces InvalidCastException later
+        /// ("[A]ClickEventHandler cannot be cast to [B]ClickEventHandler") when WPF
+        /// assigns it to MyIconButton.Click.
+        ///
+        /// The first argument is cast to the handler's first parameter type, and
+        /// the second (MouseButtonEventArgs) converts to EventArgs implicitly.
+        /// </summary>
+        private static Delegate BuildClickAdapter(Type pageType, object page, string methodName,
+                                                  Type delegateType)
         {
+            if (delegateType == null)
+            {
+                PluginApi.Log("[Test] site5 !! " + methodName + ": delegate type unknown");
+                return null;
+            }
+
             var handler = pageType.GetMethod(methodName,
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (handler == null)
@@ -993,32 +1058,68 @@ namespace PclTestPlugin
                 return null;
             }
 
-            var myListItem = _target.GetType("PCL.MyListItem", false);
-            var mouseButtonEventArgs = typeof(System.Windows.Input.MouseButtonEventArgs);
-            if (myListItem == null) { PluginApi.Log("[Test] site5 !! PCL.MyListItem missing"); return null; }
+            var invoke = delegateType.GetMethod("Invoke");
+            if (invoke == null)
+            {
+                PluginApi.Log("[Test] site5 !! " + delegateType.Name + " has no Invoke");
+                return null;
+            }
+            var dparams = invoke.GetParameters();
+            if (dparams.Length != 2)
+            {
+                PluginApi.Log("[Test] site5 !! " + delegateType.Name + " Invoke arity "
+                              + dparams.Length);
+                return null;
+            }
 
-            var clickHandlerType = myListItem.GetNestedType("ClickEventHandler");
-            if (clickHandlerType == null) { PluginApi.Log("[Test] site5 !! ClickEventHandler missing"); return null; }
+            var senderParam = System.Linq.Expressions.Expression.Parameter(dparams[0].ParameterType, "sender");
+            var argsParam = System.Linq.Expressions.Expression.Parameter(dparams[1].ParameterType, "e");
 
-            var senderParam = System.Linq.Expressions.Expression.Parameter(typeof(object), "sender");
-            var argsParam = System.Linq.Expressions.Expression.Parameter(mouseButtonEventArgs, "e");
+            // sender: only cast when the handler genuinely needs it; Save_Click
+            // takes object and handles the unwrapping itself.
+            var senderArg = ps[0].ParameterType == typeof(object) || ps[0].ParameterType.IsAssignableFrom(dparams[0].ParameterType)
+                ? (System.Linq.Expressions.Expression)senderParam
+                : System.Linq.Expressions.Expression.Convert(senderParam, ps[0].ParameterType);
+
+            var argsArg = ps[1].ParameterType.IsAssignableFrom(dparams[1].ParameterType)
+                ? (System.Linq.Expressions.Expression)argsParam
+                : System.Linq.Expressions.Expression.Convert(argsParam, ps[1].ParameterType);
 
             var call = System.Linq.Expressions.Expression.Call(
-                System.Linq.Expressions.Expression.Constant(page),
-                handler,
-                System.Linq.Expressions.Expression.Convert(senderParam, ps[0].ParameterType),
-                System.Linq.Expressions.Expression.Convert(argsParam, ps[1].ParameterType));
+                System.Linq.Expressions.Expression.Constant(page), handler, senderArg, argsArg);
 
             var body = System.Linq.Expressions.Expression.Block(call,
                 System.Linq.Expressions.Expression.Empty());
 
             var adapter = System.Linq.Expressions.Expression
-                .Lambda(clickHandlerType, body, senderParam, argsParam)
+                .Lambda(delegateType, body, senderParam, argsParam)
                 .Compile();
 
-            if (adapter == null) PluginApi.Log("[Test] site5 !! adapter for " + methodName + " is null");
+            if (adapter == null)
+                PluginApi.Log("[Test] site5 !! adapter for " + methodName + " is null");
             return adapter;
         }
+
+        /// <summary>
+        /// Resolves a nested delegate type by name, preferring the one declared on
+        /// the type the parameter actually expects (found from ToListItem's
+        /// signature) and falling back to a plugin-side type name.
+        /// </summary>
+        private static Type ResolveNestedDelegate(Type declaringType, string name)
+        {
+            try
+            {
+                if (declaringType != null)
+                {
+                    var t = declaringType.GetNestedType(name,
+                        BindingFlags.Public | BindingFlags.NonPublic);
+                    if (t != null) return t;
+                }
+            }
+            catch { }
+            return null;
+        }
+
 
         /// <summary>
         /// Reads the private ResourceTypes field; mirrors the official comparison
