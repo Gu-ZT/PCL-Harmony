@@ -176,6 +176,58 @@ jobs:
           name: PCL-Harmony-${{ needs.build.outputs.version }}
           path: ${{ runner.temp }}/dist
 
+      # Builds the per-kind file list. Runs for every release (stable or pre) so
+      # env.RELEASE_FILES is always set; the manifest/checksum files are only
+      # produced for stable releases.
+      - name: Prepare release assets
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          $zip = 'PCL-Harmony.zip'
+          if (-not (Test-Path -LiteralPath $zip)) { throw "missing $zip" }
+
+          $files = @($zip)
+
+          if ('${{ needs.build.outputs.prerelease }}' -eq 'false') {
+            # project.json is the release manifest: name, version, description.
+            $src = Join-Path $env:GITHUB_WORKSPACE 'project.json'
+            if (-not (Test-Path -LiteralPath $src)) { throw "missing project.json in workspace" }
+            Copy-Item -LiteralPath $src -Destination 'project.json' -Force
+
+            $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            "{0}  {1}" -f $hash, $zip | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
+
+            Write-Host "project.json:"
+            Get-Content -LiteralPath 'project.json'
+            Write-Host "SHA256SUMS.txt:"
+            Get-Content -LiteralPath 'SHA256SUMS.txt'
+
+            $files += 'project.json'
+            $files += 'SHA256SUMS.txt'
+          }
+
+          # Absolute paths: the publish step runs from the workspace root.
+          $abs = $files | ForEach-Object { Join-Path (Get-Location).Path $_ }
+          Write-Host "release assets:`n$($abs -join "`n")"
+
+          # Multi-line env var. Written WITHOUT a BOM: Out-File -Encoding utf8 in
+          # PowerShell 7 prepends one, which makes the runner fail to recognise
+          # the heredoc delimiter and silently drops the value.
+          $lines = @("RELEASE_FILES<<__EOF__") + $abs + @("__EOF__")
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV,
+            (($lines -join "`n") + "`n"),
+            (New-Object System.Text.UTF8Encoding($false)))
+
+      # A single publish step. softprops/action-gh-release updates an existing
+      # release rather than creating it; doing that from a SECOND invocation was
+      # rejected with "Resource not accessible by integration" (the integration
+      # token can create the release it was granted, but the follow-up update
+      # path is not covered). Publishing once avoids the second call entirely.
+      #
+      # Stable releases also ship project.json + SHA256SUMS.txt (prepared above);
+      # pre-releases only ship the archive. The file list is built in an earlier
+      # step because it differs per release kind, and an empty entry in `files`
+      # would trip fail_on_unmatched_files.
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -185,38 +237,4 @@ jobs:
           prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: ${{ runner.temp }}/dist/PCL-Harmony.zip
-
-      # Stable releases additionally publish a manifest (project.json as built)
-      # plus a checksum file, so consumers and mirrors can verify what they got.
-      - name: Attach version manifest and checksums
-        if: needs.build.outputs.prerelease == 'false'
-        shell: pwsh
-        working-directory: ${{ runner.temp }}/dist
-        run: |
-          $zip = 'PCL-Harmony.zip'
-          if (-not (Test-Path -LiteralPath $zip)) { throw "missing $zip" }
-
-          # project.json is the release manifest: name, version, description.
-          $src = Join-Path $env:GITHUB_WORKSPACE 'project.json'
-          if (Test-Path -LiteralPath $src) {
-            Copy-Item -LiteralPath $src -Destination 'project.json' -Force
-            Write-Host "project.json:"
-            Get-Content -LiteralPath 'project.json'
-          } else {
-            throw "missing project.json in workspace"
-          }
-
-          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "{0}  {1}" -f $hash, $zip | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
-          Write-Host "SHA256SUMS.txt:"
-          Get-Content -LiteralPath 'SHA256SUMS.txt'
-
-      - name: Upload manifest and checksums
-        if: needs.build.outputs.prerelease == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.build.outputs.tag }}
-          files: |
-            ${{ runner.temp }}/dist/project.json
-            ${{ runner.temp }}/dist/SHA256SUMS.txt
+          files: ${{ env.RELEASE_FILES }}
