@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
+using PclHarmony.Contract;
 
 namespace PclHarmony
 {
@@ -13,6 +14,40 @@ namespace PclHarmony
     internal static class PluginHost
     {
         internal const string PluginsFolderName = "plugins";
+
+        /// <summary>
+        /// Runtime-neutral plugin contract (netstandard2.0), see Contract.cs.
+        ///
+        /// Resolved lazily on purpose: a static field initialiser runs while the
+        /// PluginHost type itself is being initialised, which is before the
+        /// AppDomainManager bootstrap has finished resolving our own dependencies.
+        /// Touching typeof(IDeclarativePlugin) there throws TypeInitializationException
+        /// and takes the whole loader down with it.
+        /// </summary>
+        private static Type DeclarativeInterface
+        {
+            get
+            {
+                if (_declarativeInterface != null) return _declarativeInterface;
+                try { _declarativeInterface = Type.GetType("PclHarmony.Contract.IDeclarativePlugin, PclHarmony.Contract", false); }
+                catch { }
+                if (_declarativeInterface == null)
+                {
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            Type t = asm.GetType("PclHarmony.Contract.IDeclarativePlugin", false);
+                            if (t != null) { _declarativeInterface = t; break; }
+                        }
+                        catch { }
+                    }
+                }
+                return _declarativeInterface;
+            }
+        }
+
+        private static Type _declarativeInterface;
         private const int MaxDepth = 2;
 
         private static readonly List<string> Loaded = new List<string>();
@@ -151,6 +186,15 @@ namespace PclHarmony
             {
                 Type type = types[i];
                 if (type == null || type.IsAbstract || type.IsInterface) continue;
+
+                // Declarative plugins first: they are the runtime-neutral kind, and a
+                // type could in principle implement both interfaces.
+                if (DeclarativeInterface.IsAssignableFrom(type))
+                {
+                    count += LoadDeclarative(type, fileName);
+                    continue;
+                }
+
                 if (!pluginInterface.IsAssignableFrom(type))
                 {
                     // Assembly-name mismatch (plugin compiled against a different
@@ -213,6 +257,142 @@ namespace PclHarmony
             return count;
         }
 
+        /// <summary>
+        /// Loads a runtime-neutral, declarative plugin: the type only DESCRIBES the
+        /// patches it wants and this loader applies them with its own net48 Harmony.
+        ///
+        /// The indirection exists because Lib.Harmony has no netstandard2.0 build, so
+        /// a plugin that must run on both CLR 4 and CoreCLR cannot mention Harmony in
+        /// its own code. See PclHarmony.Contract.IDeclarativePlugin.
+        /// </summary>
+        private static int LoadDeclarative(Type type, string fileName)
+        {
+            if (type.GetConstructor(Type.EmptyTypes) == null)
+            {
+                LoaderLog.Info("plugins: skipping '" + type.FullName + "': no public parameterless constructor");
+                return 0;
+            }
+
+            IDeclarativePlugin plugin;
+            try
+            {
+                plugin = (IDeclarativePlugin)Activator.CreateInstance(type);
+            }
+            catch (Exception ex)
+            {
+                LoaderLog.Info("plugins: cannot instantiate '" + type.FullName + "': " + Describe(ex));
+                return 0;
+            }
+
+            string name = SafeName(plugin, type);
+            Harmony harmony = PluginApi.GetHarmony(name);
+            LoaderLog.Info("plugin: loading declarative '" + name + "' (" + type.FullName + ") from " + fileName);
+
+            int applied = 0;
+            try
+            {
+                string version = _target == null ? "(none)" : _target.GetName().Version.ToString();
+                var specs = plugin.GetPatches("official", version);
+                if (specs != null)
+                {
+                    foreach (PatchSpec spec in specs)
+                    {
+                        if (spec == null) continue;
+                        try
+                        {
+                            ApplyDeclarativePatch(harmony, spec);
+                            applied++;
+                        }
+                        catch (Exception ex)
+                        {
+                            LoaderLog.Info("plugin: '" + name + "' patch failed " + spec + ": " + Describe(ex));
+                        }
+                    }
+                }
+
+                lock (Loaded) { Loaded.Add(name); }
+                LoaderLog.Info("plugin: loaded declarative '" + name + "' OK, harmony=\"" + name
+                               + "\", patch count=" + applied);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                try { harmony.UnpatchAll(harmony.Id); } catch { }
+                LoaderLog.Info("plugin: declarative '" + name + "' FAILED (isolated, launcher continues): "
+                               + Describe(ex));
+                return 0;
+            }
+        }
+
+        private static void ApplyDeclarativePatch(Harmony harmony, PatchSpec spec)
+        {
+            Type targetType = FindType(spec.TypeName);
+            if (targetType == null) throw new InvalidOperationException("target type not found: " + spec.TypeName);
+
+            BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic
+                                 | BindingFlags.Static | BindingFlags.Instance;
+            MethodInfo target = null;
+            foreach (MethodInfo m in targetType.GetMethods(flags))
+            {
+                if (m.Name != spec.MethodName) continue;
+                if (!ParametersMatch(m, spec.TargetParameterTypes)) continue;
+                target = m;
+                break;
+            }
+            if (target == null)
+                throw new InvalidOperationException("target method not found: " + spec.TypeName + "." + spec.MethodName);
+
+            Type hookType = FindType(spec.HookTypeName);
+            if (hookType == null) throw new InvalidOperationException("hook type not found: " + spec.HookTypeName);
+
+            MethodInfo hook = hookType.GetMethod(spec.HookMethodName,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            if (hook == null)
+                throw new InvalidOperationException("hook method not found: "
+                                                    + spec.HookTypeName + "." + spec.HookMethodName);
+
+            // A compiler-generated closure cannot be handed to Harmony even though an
+            // identical named static method works.
+            if (hook.Name.IndexOf('<') >= 0)
+                throw new InvalidOperationException("hook is a compiler-generated closure; "
+                    + "write it as a real static method: " + spec.HookTypeName + "." + spec.HookMethodName);
+
+            HarmonyMethod hm = new HarmonyMethod(hook);
+            if (string.Equals(spec.HookKind, "prefix", StringComparison.OrdinalIgnoreCase))
+                harmony.Patch(target, hm, null, null);
+            else
+                harmony.Patch(target, null, hm, null);
+
+            LoaderLog.Info("plugin: applied " + spec.HookKind + " " + spec.TypeName + "." + spec.MethodName);
+        }
+
+        private static bool ParametersMatch(MethodInfo m, string[] typeNames)
+        {
+            if (typeNames == null || typeNames.Length == 0) return true;
+            ParameterInfo[] ps = m.GetParameters();
+            if (ps.Length != typeNames.Length) return false;
+            for (int i = 0; i < ps.Length; i++)
+                if (!string.Equals(ps[i].ParameterType.Name, typeNames[i], StringComparison.Ordinal))
+                    return false;
+            return true;
+        }
+
+        private static Type FindType(string fullName)
+        {
+            if (string.IsNullOrEmpty(fullName)) return null;
+            foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    Type t = asm.GetType(fullName, false);
+                    if (t != null) return t;
+                }
+                catch { }
+            }
+            try { return Type.GetType(fullName, false); } catch { }
+            return null;
+        }
+
         private static Type[] Flatten(ReflectionTypeLoadException ex)
         {
             Type[] raw = ex.Types;
@@ -223,6 +403,21 @@ namespace PclHarmony
             int j = 0;
             for (int i = 0; i < raw.Length; i++) if (raw[i] != null) clean[j++] = raw[i];
             return clean;
+        }
+
+        private static string SafeName(IDeclarativePlugin instance, Type type)
+        {
+            try
+            {
+                string name = instance.Name;
+                if (string.IsNullOrEmpty(name)) return type.Name;
+                return name;
+            }
+            catch (Exception ex)
+            {
+                LoaderLog.Info("plugin: '" + type.FullName + "'.Name threw, using type name: " + Describe(ex));
+                return type.Name;
+            }
         }
 
         private static string SafeName(IPlugin instance, Type type)

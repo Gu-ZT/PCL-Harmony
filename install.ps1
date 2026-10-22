@@ -3,7 +3,22 @@
     Installs the PCL Harmony loader into a Plain Craft Launcher installation.
 
 .DESCRIPTION
-    One-shot installer. Three independent steps, safe to re-run:
+    One-shot installer that supports BOTH launchers. Which one it targets is
+    detected from the files in -TargetDir:
+
+      official PCL   has "Plain Craft Launcher 2.exe" (net48 / CLR 4)
+      PCL-CE         has "PCL2_CE_*.exe"            (net10 / CoreCLR)
+
+    They need completely different mechanisms, so the payload differs too. It is
+    selected from libs\:
+
+      libs\official\   PclHarmony.dll, 0Harmony.dll            (net48 builds)
+      libs\ce\         PclHarmony.CeHost.dll, PclHarmony.Contract.dll,
+                       0Harmony.dll                            (net10 build)
+
+    --- official PCL -------------------------------------------------------
+
+    Three independent steps, safe to re-run:
 
       1. copies PclHarmony.dll and 0Harmony.dll next to "Plain Craft Launcher 2.exe";
       2. creates an EMPTY "plugins\" next to the executable, as a drop point;
@@ -29,26 +44,43 @@
     "运行环境错误": the CLR would fall back to legacy path handling and reject the
     \\?\ prefixed extended paths PCL builds.
 
-    The loader binaries are looked up next to this script first (the layout of a
-    release archive), then in dist\PclHarmony\, then in src\loader\bin\Release\.
+    --- PCL-CE -------------------------------------------------------------
+
+    The CE binary is a .NET apphost with no CLR header, so an AppDomainManager
+    cannot be injected. It is driven by the .NET startup hook mechanism instead:
+
+      1. copies PclHarmony.CeHost.dll, PclHarmony.Contract.dll and 0Harmony.dll;
+      2. writes "Run-with-PCL-Harmony.cmd", which sets DOTNET_STARTUP_HOOKS and
+         then starts the launcher;
+      3. creates an EMPTY "plugins\".
+
+    The launcher binary itself is never modified. Because an external
+    runtimeconfig.json is ignored (the CE bundle carries its own configuration),
+    the startup hook can only arrive through the environment variable, which is
+    what the generated wrapper sets. Start the launcher through that wrapper.
+
+    --- payload lookup -----------------------------------------------------
+
+    libs\<kind>\ is preferred; a release archive layout (payload next to this
+    script) and the build output folders are accepted as fallbacks.
 
 .PARAMETER TargetDir
-    Directory that contains "Plain Craft Launcher 2.exe".
+    Directory that contains the launcher executable.
     Optional: when omitted, the current working directory is used, so unzipping
     the release into the launcher folder and running .\install.ps1 is enough.
 
 .PARAMETER Force
-    Overwrite an existing PclHarmony.dll / 0Harmony.dll without prompting.
+    Overwrite payload files that already exist without prompting.
 
 .EXAMPLE
     .\install.ps1
-    Installs into the current directory.
+    Installs into the current directory (works for either launcher).
 
 .EXAMPLE
     .\install.ps1 -TargetDir "D:\PCL"
 
 .EXAMPLE
-    .\install.ps1 -TargetDir "D:\PCL" -Force
+    .\install.ps1 -TargetDir "D:\PCL-CE" -Force
 #>
 [CmdletBinding()]
 param(
@@ -64,30 +96,51 @@ $LogName         = 'PclHarmony.log'
 $ManagerAssembly = 'PclHarmony'
 $ManagerType     = 'PclHarmony.Entry'
 
+# CE is a .NET apphost and cannot take an AppDomainManager; it is driven by a
+# startup hook instead (see src\ce-host).
+$CeExePattern    = 'PCL2_CE_*.exe'
+$CeHookName      = 'PclHarmony.CeHost.dll'
+$CeWrapperName   = 'Run-with-PCL-Harmony.cmd'
+
 function Write-Step([string]$Message) { Write-Host "[install] $Message" }
 function Write-Fail([string]$Message) { Write-Host "[install] ERROR: $Message" -ForegroundColor Red }
 
 # ------------------------------------------------------- locate the payload ----
-$payloadCandidates = @(
+# libs/ holds one sub-directory per launcher kind. The two runtimes are
+# incompatible (net48/CLR4 vs net10/CoreCLR) and Harmony ships separate builds for
+# each, so the payload is chosen by target, not shared.
+$OfficialPayloadCandidates = @(
+    (Join-Path $PSScriptRoot 'libs\official'),
     $PSScriptRoot,
     (Join-Path $PSScriptRoot 'dist\PclHarmony'),
     (Join-Path $PSScriptRoot 'src\loader\bin\Release')
 )
+$CePayloadCandidates = @(
+    (Join-Path $PSScriptRoot 'libs\ce'),
+    (Join-Path $PSScriptRoot 'src\ce-host\bin\Release')
+)
 
-$PayloadDir = $null
-foreach ($candidate in $payloadCandidates) {
-    if ([string]::IsNullOrEmpty($candidate)) { continue }
-    if ((Test-Path -LiteralPath (Join-Path $candidate 'PclHarmony.dll') -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $candidate '0Harmony.dll') -PathType Leaf)) {
-        $PayloadDir = $candidate
-        break
+function Find-OfficialPayload {
+    foreach ($candidate in $OfficialPayloadCandidates) {
+        if ([string]::IsNullOrEmpty($candidate)) { continue }
+        if ((Test-Path -LiteralPath (Join-Path $candidate 'PclHarmony.dll') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate '0Harmony.dll') -PathType Leaf)) {
+            return $candidate
+        }
     }
+    return $null
 }
 
-if ($null -eq $PayloadDir) {
-    Write-Fail 'loader binaries not found (PclHarmony.dll + 0Harmony.dll).'
-    Write-Host  '[install] place this script next to the two DLLs, or run a build first.'
-    exit 1
+function Find-CePayload {
+    foreach ($candidate in $CePayloadCandidates) {
+        if ([string]::IsNullOrEmpty($candidate)) { continue }
+        if ((Test-Path -LiteralPath (Join-Path $candidate $CeHookName) -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate '0Harmony.dll') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate 'PclHarmony.Contract.dll') -PathType Leaf)) {
+            return $candidate
+        }
+    }
+    return $null
 }
 
 # ---------------------------------------------------------------- preflight ---
@@ -106,24 +159,121 @@ if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) {
 }
 
 $ExePath = Join-Path $TargetDir $ExeName
+$isCe = $false
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
-    Write-Fail "'$ExeName' not found in $TargetDir"
-    Write-Host  '[install] run this script from the launcher folder, or pass -TargetDir <that folder>'
-    exit 1
+    # Not the official launcher: try PCL-CE, which names its binary per platform.
+    $ceExe = @(Get-ChildItem -LiteralPath $TargetDir -Filter $CeExePattern -File -ErrorAction SilentlyContinue)
+    if ($ceExe.Count -ge 1) {
+        $isCe = $true
+        $ExePath = $ceExe[0].FullName
+    }
+    else {
+        Write-Fail "'$ExeName' not found in $TargetDir (and no $CeExePattern either)"
+        Write-Host  '[install] run this script from the launcher folder, or pass -TargetDir <that folder>'
+        exit 1
+    }
 }
-Write-Step "target: $TargetDir"
-Write-Step "payload: $PayloadDir"
+
+if ($isCe) {
+    Write-Step "target: $TargetDir"
+    Write-Step "launcher: PCL-CE ($(Split-Path $ExePath -Leaf))"
+}
+else {
+    Write-Step "target: $TargetDir"
+    Write-Step "launcher: official PCL"
+}
 
 $running = @(Get-Process -ErrorAction SilentlyContinue |
-             Where-Object { $_.ProcessName -like '*Plain Craft*' })
+             Where-Object { $_.ProcessName -like '*Plain Craft*' -or $_.ProcessName -like 'PCL2_CE_*' })
 if ($running.Count -gt 0) {
     Write-Fail 'the launcher is running - close it first (the DLLs are locked while it runs)'
     exit 1
 }
 
+# PCL-CE installs through a startup hook + wrapper script and shares nothing with
+# the AppDomainManager path, so it is handled by its own function and then returns.
+function Install-CePayload {
+    param([string]$Target, [string]$ExePath)
+
+    $payload = Find-CePayload
+    if ($null -eq $payload) {
+        Write-Fail "PCL-CE payload not found ($CeHookName + 0Harmony.dll + PclHarmony.Contract.dll)."
+        Write-Host  '[install] expected in libs\ce\ (run a build first).'
+        exit 1
+    }
+    Write-Step "payload: $payload (ce)"
+
+    foreach ($file in @($CeHookName, 'PclHarmony.Contract.dll', '0Harmony.dll')) {
+        $source = Join-Path $payload $file
+        $dest   = Join-Path $Target $file
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            Write-Fail "payload file missing: $source"
+            exit 1
+        }
+        if ((Test-Path -LiteralPath $dest) -and -not $Force) {
+            Write-Step "already present: $file (use -Force to overwrite)"
+        }
+        else {
+            Copy-Item -LiteralPath $source -Destination $dest -Force
+            Write-Step "copied $file"
+        }
+    }
+
+    # Startup hooks are only reachable through the DOTNET_STARTUP_HOOKS environment
+    # variable: an external runtimeconfig.json is ignored because the CE bundle has
+    # its own configuration compiled in. A wrapper is the least invasive way to set
+    # it without modifying the launcher binary.
+    $wrapperPath = Join-Path $Target $CeWrapperName
+    $exeLeaf = Split-Path $ExePath -Leaf
+    # Build each line with string concatenation. Using an array + -join looks tidy
+    # but PowerShell splats multi-line array literals unpredictably here, which
+    # produced a batch file with the path broken across lines.
+    $nl = "`r`n"
+    $wrapper = '@echo off' + $nl +
+               'rem Generated by PCL Harmony: starts PCL-CE with the loader as a startup hook.' + $nl +
+               'set DOTNET_STARTUP_HOOKS=%~dp0' + $CeHookName + $nl +
+               'start "" "%~dp0' + $exeLeaf + '"' + $nl
+    if ((Test-Path -LiteralPath $wrapperPath) -and -not $Force) {
+        Write-Step "already present: $CeWrapperName (use -Force to overwrite)"
+    }
+    else {
+        Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding ASCII
+        Write-Step "wrote $CeWrapperName"
+    }
+
+    $pluginsDir = Join-Path $Target 'plugins'
+    if (Test-Path -LiteralPath $pluginsDir -PathType Container) {
+        Write-Step 'plugins\ already exists'
+    }
+    else {
+        $null = New-Item -ItemType Directory -Path $pluginsDir -Force
+        Write-Step 'created empty plugins\'
+    }
+
+    Write-Host ''
+    Write-Step 'PCL-CE install complete'
+    Write-Step "  start via: $CeWrapperName  (NOT the exe directly - the hook needs the env var)"
+    Write-Step "  plugins\ : created empty, no plugin DLL copied (drop them in yourself)"
+    Write-Step "  log      : $(Join-Path $Target $LogName)"
+}
+
+if ($isCe) {
+    Install-CePayload -Target $TargetDir -ExePath $ExePath
+    return
+}
+
+$PayloadDir = Find-OfficialPayload
+if ($null -eq $PayloadDir) {
+    Write-Fail 'loader binaries not found (PclHarmony.dll + 0Harmony.dll).'
+    Write-Host  '[install] place this script next to the two DLLs, or run a build first.'
+    exit 1
+}
+Write-Step "payload: $PayloadDir (official)"
+
 # ------------------------------------------------------------- copy binaries ---
-foreach ($item in @(@{ Src = 'PclHarmony.dll'; Dst = 'PclHarmony.dll' },
-                    @{ Src = '0Harmony.dll';   Dst = '0Harmony.dll' })) {
+foreach ($item in @(@{ Src = 'PclHarmony.dll';           Dst = 'PclHarmony.dll' },
+                    @{ Src = '0Harmony.dll';             Dst = '0Harmony.dll' },
+                    @{ Src = 'PclHarmony.Contract.dll';  Dst = 'PclHarmony.Contract.dll' })) {
     $source = Join-Path $PayloadDir $item.Src
     $dest   = Join-Path $TargetDir $item.Dst
 

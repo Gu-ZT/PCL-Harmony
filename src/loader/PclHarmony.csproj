@@ -17,6 +17,10 @@
          which reads them from project.json in the repo root. Do not set them here. -->
   </PropertyGroup>
   <ItemGroup>
+    <!-- The runtime-neutral plugin contract (netstandard2.0). A netstandard2.0
+         assembly is loadable from both CLR 4 and CoreCLR, which is what lets one
+         plugin DLL serve this loader and the PCL-CE host. -->
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" />
     <!-- Lib.Harmony is referenced through NuGet so the build is machine independent.
          Private=true copies 0Harmony.dll into the output folder; it is then shipped
          next to the launcher, where the injected loader resolves it by simple name. -->

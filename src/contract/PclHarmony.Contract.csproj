@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>PclHarmony.Contract</AssemblyName>
+    <RootNamespace>PclHarmony.Contract</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <!-- Deliberately NO Harmony reference: this contract must load on CLR 4 AND CoreCLR.
+       Harmony has no netstandard2.0 build, so it can never appear in these signatures. -->
+</Project>

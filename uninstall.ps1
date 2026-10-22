@@ -69,17 +69,72 @@ if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) {
 }
 
 $ExePath = Join-Path $TargetDir $ExeName
+$isCe = $false
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
-    Write-Fail "'$ExeName' not found in $TargetDir"
-    exit 1
+    # Not the official launcher: try PCL-CE, which names its binary per platform.
+    $ceExe = @(Get-ChildItem -LiteralPath $TargetDir -Filter 'PCL2_CE_*.exe' -File -ErrorAction SilentlyContinue)
+    if ($ceExe.Count -ge 1) {
+        $isCe = $true
+        $ExePath = $ceExe[0].FullName
+    }
+    else {
+        Write-Fail "'$ExeName' not found in $TargetDir (and no PCL2_CE_*.exe either)"
+        exit 1
+    }
 }
-Write-Step "target: $TargetDir"
+
+if ($isCe) { Write-Step "target: $TargetDir (PCL-CE)" }
+else       { Write-Step "target: $TargetDir (official PCL)" }
 
 $running = @(Get-Process -ErrorAction SilentlyContinue |
-             Where-Object { $_.ProcessName -like '*Plain Craft*' })
+             Where-Object { $_.ProcessName -like '*Plain Craft*' -or $_.ProcessName -like 'PCL2_CE_*' })
 if ($running.Count -gt 0) {
     Write-Fail 'the launcher is running - close it first (the DLLs are locked while it runs)'
     exit 1
+}
+
+# PCL-CE has no AppDomainManager config to unwind: its install is just files plus a
+# generated wrapper, so it is removed as a flat file list.
+if ($isCe) {
+    $ceFiles = @(
+        'PclHarmony.CeHost.dll',
+        'PclHarmony.Contract.dll',
+        '0Harmony.dll',
+        'Run-with-PCL-Harmony.cmd'
+    )
+    $removedCe = 0
+    foreach ($name in $ceFiles) {
+        $path = Join-Path $TargetDir $name
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force
+            Write-Step "deleted $name"
+            $removedCe++
+        }
+        else {
+            Write-Step "not present: $name"
+        }
+    }
+    if ($removedCe -eq 0) { Write-Step 'loader files were already absent' }
+
+    if ($RemovePlugins) {
+        $pluginsDir = Join-Path $TargetDir 'plugins'
+        if (Test-Path -LiteralPath $pluginsDir) {
+            Remove-Item -LiteralPath $pluginsDir -Recurse -Force
+            Write-Step 'deleted plugins\'
+        }
+    }
+    if ($RemoveLog) {
+        $logPath = Join-Path $TargetDir $LogName
+        if (Test-Path -LiteralPath $logPath) {
+            Remove-Item -LiteralPath $logPath -Force
+            Write-Step "deleted $LogName"
+        }
+    }
+
+    Write-Host ''
+    Write-Step 'PCL-CE uninstall complete'
+    Write-Step '  the launcher executable itself was never modified'
+    return
 }
 
 # ------------------------------------------------------------- delete binaries ---

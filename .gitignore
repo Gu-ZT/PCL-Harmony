@@ -26,3 +26,8 @@ dist/
 
 # ---- scratch ---------------------------------------------------------------
 .dsh-*/
+
+# ---- launcher runtime artifacts --------------------------------------------
+# Created when a test instance is started from the repository root.
+/.minecraft/
+/PCL/

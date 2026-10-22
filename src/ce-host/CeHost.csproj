@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>PclHarmony.CeHost</AssemblyName>
+    <RootNamespace>PclHarmony.Ce</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+    <NoWarn>CS0618</NoWarn>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The shared contract: netstandard2.0, so it loads on both CLR 4 and CoreCLR. -->
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" />
+    <!-- Compile-time reference only: the CE payload ships its own 0Harmony.dll next
+         to this assembly, exactly like the net48 loader does on the official side. -->
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" ExcludeAssets="runtime" />
+  </ItemGroup>
+</Project>

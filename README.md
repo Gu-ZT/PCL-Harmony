@@ -10,9 +10,20 @@
 
 ## 这是什么
 
-PCL Harmony 是一个 **插件加载器**：它在 Plain Craft Launcher 2（下称 PCL）启动的过程中取得执行权，把 [Harmony](https://github.com/pardeike/Harmony) 注入到 PCL 的 AppDomain 内，从而让第三方插件可以在运行时对 PCL 的方法打补丁。
+PCL Harmony 是一个 **插件加载器**：它在启动器启动的过程中取得执行权，把 [Harmony](https://github.com/pardeike/Harmony) 注入到启动器的 AppDomain 内，从而让第三方插件可以在运行时对启动器的方法打补丁。
 
-仓库同时包含一个**示例插件**（`src/sample-plugin/`），用于演示插件如何接入。示例插件只作参考用途，本文不介绍它的具体功能。
+**同时支持两个启动器**：
+
+| | 官方 PCL | PCL-CE |
+| --- | --- | --- |
+| 可执行文件 | `Plain Craft Launcher 2.exe` | `PCL2_CE_*.exe` |
+| 目标框架 | net48（CLR 4） | net10（CoreCLR） |
+| 取得执行权的方式 | `AppDomainManager` 注入 | .NET 启动钩子（startup hook） |
+| 是否修改启动器本体 | 否（只写 `exe.config`） | 否（靠包装脚本传环境变量） |
+
+两者运行时互不兼容，因此 `libs/` 下按目标各放一套载荷，`install.ps1` 会自动识别并选用。插件若只针对其中一个启动器，按普通插件写即可；若想**一份插件两端通用**，见「[跨启动器插件](#跨启动器插件)」。
+
+仓库同时包含**示例插件**（`src/sample-plugin/`、`src/example-title/`、`src/example-shared/`），用于演示插件如何接入。示例插件只作参考用途，本文不介绍它们的具体功能。
 
 ---
 
@@ -79,18 +90,31 @@ PCL 把它的全部依赖（`MeloongCore`、`MeloongCore.Wpf`、`PCLCS`、`Newto
 ```
 project.json               版本清单（唯一版本来源：name / version / description）
 Directory.Build.props      把 project.json 的 version 注入所有项目的程序集版本
-src/loader/                加载器 C# 源码（net48，输出 PclHarmony.dll）
+
+src/contract/              跨运行时插件契约（netstandard2.0）
+  Contract.cs              IDeclarativePlugin / PatchSpec
+
+src/loader/                官方 PCL 加载器（net48，输出 PclHarmony.dll）
   Entry.cs                 AppDomainManager 入口，订阅 AssemblyLoad
   EmbeddedResolver.cs      内嵌依赖解析（PCL.Resources.resources）
-  PluginHost.cs            plugins\ 扫描、插件实例化与加载
+  PluginHost.cs            plugins\ 扫描、插件实例化与加载（含声明式插件）
   LoaderLog.cs             延迟初始化的低开销日志（PclHarmony.log）
-  IPlugin.cs               插件接口
+  IPlugin.cs               原生插件接口
   PluginApi.cs             暴露给插件的辅助 API
-src/sample-plugin/         示例插件 C# 源码（net48，输出 Example.dll）
+
+src/ce-host/               PCL-CE 加载器（net8，输出 PclHarmony.CeHost.dll）
+  StartupHook.cs           启动钩子入口（全局 StartupHook 类型）
+  Host.cs                  plugins\ 扫描、按 PatchSpec 应用补丁
+
+src/sample-plugin/         示例插件（net48，输出 Example.dll）
 src/example-title/         示例插件：标题栏标记（net48，输出 Example-Title.dll）
-install.ps1                一键安装（省略 -TargetDir 时使用当前目录）
+src/example-shared/        示例插件：跨启动器通用（netstandard2.0，输出 Example.Shared.dll）
+
+install.ps1                一键安装（自动识别目标；省略 -TargetDir 时用当前目录）
 uninstall.ps1              一键卸载
-build.ps1                  构建三个项目并刷新 dist\
+build.ps1                  构建全部项目并刷新 dist\ 与 libs\
+libs/official/             官方 PCL 载荷（net48）
+libs/ce/                   PCL-CE 载荷（net10）
 dist/                      构建产物（由 build.ps1 生成，不纳入版本控制）
 ```
 
@@ -121,8 +145,8 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
 ### 前置条件
 
 - Windows
-- [.NET Framework 4.8](https://dotnet.microsoft.com/download/dotnet-framework/net48)（PCL 本身即基于它运行）
-- 一份 **PCL 2.99.0.0** 的安装目录
+- 官方 PCL：一份 **PCL 2.99.0.0** 的安装目录 + [.NET Framework 4.8](https://dotnet.microsoft.com/download/dotnet-framework/net48)（PCL 本身即基于它运行）
+- PCL-CE：一份 PCL-CE 的安装目录 + [.NET 10 运行时](https://dotnet.microsoft.com/download/dotnet/10.0)（CE 需要它才能启动）
 
 ### 使用 Releases（推荐）
 
@@ -130,12 +154,13 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
 
    ```
    install.ps1   uninstall.ps1   README.md
-   PclHarmony.dll   0Harmony.dll
-   plugins\Example.dll   plugins\Example-Title.dll
+   libs\official\   PclHarmony.dll   PclHarmony.Contract.dll   0Harmony.dll
+   libs\ce\         PclHarmony.CeHost.dll   PclHarmony.Contract.dll   0Harmony.dll
+   plugins\Example.dll   plugins\Example-Title.dll   plugins\Example.Shared.dll
    ```
 
-2. 关闭正在运行的 PCL。
-3. 把压缩包解压到 **PCL 目录**（和 `Plain Craft Launcher 2.exe` 放一起），然后在该目录打开 PowerShell：
+2. 关闭正在运行的启动器。
+3. 把压缩包解压到**启动器目录**（和 exe 放一起），然后在该目录打开 PowerShell：
 
    ```powershell
    .\install.ps1
@@ -147,23 +172,39 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
    .\install.ps1 -TargetDir "D:\你的\PCL 目录"
    ```
 
-`install.ps1` 会做三件事，且可以重复执行：
+`install.ps1` 会**自动识别目标**：看到 `Plain Craft Launcher 2.exe` 按官方 PCL 处理，看到 `PCL2_CE_*.exe` 按 PCL-CE 处理，并从 `libs\` 取对应载荷。
+
+#### 官方 PCL
 
 | 步骤 | 动作 |
 | --- | --- |
-| 1 | 把 `PclHarmony.dll`、`0Harmony.dll` 复制到 PCL 可执行文件旁边 |
+| 1 | 把 `PclHarmony.dll`、`PclHarmony.Contract.dll`、`0Harmony.dll` 复制到 exe 旁边 |
 | 2 | 创建**空的** `plugins\` 目录（已存在则跳过） |
 | 3 | 写入 / 合并 `Plain Craft Launcher 2.exe.config` 中前述三段配置 |
 
-脚本会自动定位 `PclHarmony.dll` 和 `0Harmony.dll`：先找脚本自身所在目录（Release 压缩包的布局），再找 `dist\PclHarmony\`，最后找 `src\loader\bin\Release\`。
+安装完成后直接启动 PCL 即可。
+
+#### PCL-CE
+
+CE 的 exe 是 .NET apphost，**无法注入 `AppDomainManager`**，因此改用 .NET 官方的启动钩子（startup hook）：
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 复制 `PclHarmony.CeHost.dll`、`PclHarmony.Contract.dll`、`0Harmony.dll` |
+| 2 | 生成 `Run-with-PCL-Harmony.cmd`（设置 `DOTNET_STARTUP_HOOKS` 后启动 CE） |
+| 3 | 创建**空的** `plugins\` 目录 |
+
+**CE 必须通过 `Run-with-PCL-Harmony.cmd` 启动，直接双击 exe 不会加载插件。** 原因是启动钩子只能通过环境变量传入：CE 是单文件 bundle，配置已内嵌，外部 `runtimeconfig.json` 会被忽略。启动器本体不会被修改。
+
+> CE 是单实例程序。若已有 CE 在运行，新实例会立刻正常退出（exit code 0），这是 CE 自身的行为，不是安装失败。
+
+两个启动器都会在各自目录下写一份 `PclHarmony.log`，可以从中确认加载器是否生效。
 
 **`install.ps1` 只创建 `plugins\`，不往里放任何插件。** 压缩包自带的 `plugins\` 只是示例插件的来源，脚本不会把它复制到目标目录；要用哪个插件，手动把对应 DLL 复制进去即可。
 
-安装完成后直接启动 PCL 即可。加载器会在 PCL 目录下写一份 `PclHarmony.log`，可以从中确认它是否生效。
-
 ### 放置插件
 
-插件就是普通的 `.dll`，**直接放进 PCL 目录下的 `plugins\` 文件夹**即可：
+插件就是普通的 `.dll`，**直接放进启动器目录下的 `plugins\` 文件夹**即可：
 
 ```
 D:\你的\PCL 目录\
@@ -232,6 +273,17 @@ config 里其他内容一律保留。`plugins\` 文件夹与 `PclHarmony.log` **
 ---
 
 ## 编写插件
+
+插件分两类，按你要支持几个启动器选：
+
+| | 原生插件（`IPlugin`） | 跨启动器插件（`IDeclarativePlugin`） |
+| --- | --- | --- |
+| 目标框架 | net48 | **netstandard2.0** |
+| 可运行于 | 仅官方 PCL | 官方 PCL **和** PCL-CE |
+| 插件内能否直接用 Harmony | 可以 | **不能**，只能声明补丁点 |
+| 适用场景 | 只针对官方 PCL | 想一份 DLL 两端通用 |
+
+只针对官方 PCL 写插件时用前者，最直接；想两端通用则用后者，见「跨启动器插件」。
 
 ### 插件接口
 
@@ -320,9 +372,105 @@ namespace MyPlugin
 
 ---
 
+## 跨启动器插件
+
+想让**一个 DLL 同时运行在官方 PCL 和 PCL-CE 上**，需要绕开两个硬约束。
+
+### 约束一：两端唯一的共同目标是 netstandard2.0
+
+| 目标框架 | 官方 PCL（CLR 4） | PCL-CE（CoreCLR） |
+| --- | --- | --- |
+| net48 | 可以 | 不可以 |
+| net10.0 | 不可以 | 可以 |
+| **netstandard2.0** | **可以** | **可以** |
+
+所以跨启动器插件必须编译为 **netstandard2.0**。
+
+### 约束二：netstandard2.0 插件不能自己调用 Harmony
+
+Lib.Harmony 2.4.2 **没有 netstandard2.0 构建**（只有 net35 / net452 / net472 / net48 / net5.0…net10.0 / netcoreapp3.x）。而且即使反射加载 net48 版，从 netstandard2.0 调用方驱动它也会失败：
+
+```
+TypeLoadException: "MonoMod.Utils.Cil.ILGeneratorProxy[TTarget]" 上的
+GenericArguments[0] ("MonoMod.Utils.Cil.CecilILGenerator") 与类型参数"TTarget"的约束冲突
+```
+
+同样的补丁逻辑，从**原生 net48 程序集**调用就完全正常——这是调用方运行时导致的差异，不是用法问题。
+
+### 解决办法：插件只声明，宿主来执行
+
+跨启动器插件实现 `PclHarmony.Contract.IDeclarativePlugin`，**只描述要打哪些补丁**；Harmony 由各自的宿主按自己的运行时应用（官方侧用 net48 版，CE 侧用 net10 版）。
+
+```csharp
+using System.Collections.Generic;
+using PclHarmony.Contract;
+
+public sealed class MySharedPlugin : IDeclarativePlugin
+{
+    public string Name { get { return "My.Shared.Plugin"; } }
+
+    public IEnumerable<PatchSpec> GetPatches(string hostKind, string hostVersion)
+    {
+        // hostKind: "official" 或 "ce"；按需分支
+        if (hostKind == "ce")
+        {
+            yield return new PatchSpec
+            {
+                TypeName       = "PCL.Program",     // 目标类型
+                MethodName     = "Main",            // 目标方法
+                HookKind       = "postfix",         // "prefix" 或 "postfix"
+                HookTypeName   = typeof(MySharedPlugin).FullName,
+                HookMethodName = "CeAfterMain",     // 必须是真实静态方法
+            };
+        }
+        else
+        {
+            yield return new PatchSpec
+            {
+                TypeName       = "PCL.Application",
+                MethodName     = "Main",
+                HookKind       = "postfix",
+                HookTypeName   = typeof(MySharedPlugin).FullName,
+                HookMethodName = "OfficialAfterMain",
+            };
+        }
+    }
+
+    // hook 必须是 public static 具名方法
+    public static void CeAfterMain()       { /* ... */ }
+    public static void OfficialAfterMain() { /* ... */ }
+}
+```
+
+工程文件只需引用契约，**不要引用 Harmony**：
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>MySharedPlugin</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" Private="false" />
+  </ItemGroup>
+</Project>
+```
+
+完整可运行示例见 `src/example-shared/`。
+
+### 编写要点
+
+- **hook 必须是具名的 `public static` 方法**，不能是 lambda。编译器生成的闭包（形如 `<GetPatches>b__2_0`）交给 Harmony 会失败，即使函数体完全相同。
+- **两端的目标方法名通常不同**：官方 PCL 是 VB 的 `PCL.Application.Main`，PCL-CE 是 C# 的 `PCL.Program.Main`，补丁目标要分别指定。
+- **CE 侧存在加载时机问题**：启动钩子在 `Main` 之前运行，此时 `PCL.Core` 等程序集尚未加载。CE 宿主会订阅 `AssemblyLoad`，等目标程序集出现后再应用补丁，因此 `TypeName` 指向稍后才加载的类型也能生效。
+- **补丁逻辑基本无法共享**：两端的内部类型和方法是两套代码，能共享的是框架与调度，具体 patch 仍要各写一份。
+- **`hostVersion` 可用来做版本判断**：官方 PCL 是 `2.99.x`，PCL-CE 是 `2.15.x`，两者程序集同名（`Plain Craft Launcher 2`），只能靠版本号区分。
+
+---
+
 ## 从源码构建
 
-只需要 .NET SDK（net48 的参考程序集由 NuGet 还原，无需安装 Visual Studio）：
+需要 .NET SDK 8（net48 的参考程序集由 NuGet 还原，无需安装 Visual Studio）。
 
 ```powershell
 git clone <本仓库地址>
@@ -330,14 +478,19 @@ cd PCL-Harmony
 .\build.ps1
 ```
 
-`build.ps1` 会：
+`build.ps1` 会构建全部项目，并刷新两个输出目录：
 
-1. `dotnet build src\loader\PclHarmony.csproj -c Release`
-2. `dotnet build src\sample-plugin\Example.csproj -c Release`
-3. 把产物刷新到 `dist\PclHarmony\PclHarmony.dll`、`dist\PclHarmony\0Harmony.dll`、`dist\plugins\Example.dll`、`dist\plugins\Example-Title.dll`
-4. 校验三个产物的程序集名称与版本
+| 输出 | 内容 |
+| --- | --- |
+| `dist\` | `PclHarmony.dll`、`0Harmony.dll`、`plugins\Example*.dll` |
+| `libs\official\` | 官方 PCL 载荷（net48） |
+| `libs\ce\` | PCL-CE 载荷（net8 宿主 + net10 Harmony） |
 
-之后即可用 `dist\` 里的文件配合 `install.ps1 -TargetDir <PCL 目录>` 安装。
+最后校验各产物的程序集名称与版本。
+
+之后即可用 `libs\` 配合 `install.ps1 -TargetDir <启动器目录>` 安装。
+
+> **CE 宿主为什么是 net8 而不是 net10？** 它运行在 CE 的 .NET 10 运行时上，但 net8 程序集可以正常加载到 net10 运行时（已实测），而 net10 目标需要 .NET 10 SDK 才能编译。若你本机装了 .NET 10 SDK，可把 `src\ce-host\CeHost.csproj` 的 `TargetFramework` 改成 `net10.0`。
 
 推送到 `main` 会自动构建并发布一个 **预发布**（`v<version>-dev.<run_number>`）；推送 `v*` 标签则发布**正式版**，并额外附带 `project.json` 与 `SHA256SUMS.txt`。详见 `.github/workflows/ci.yml`。
 
@@ -347,15 +500,17 @@ cd PCL-Harmony
 
 以下限制都是**真实存在**的，请在依赖本方案前先了解：
 
-1. **依赖 PCL 2.99.0.0 的精确方法签名与 IL 形态。** 本加载器与示例插件都是针对该版本逆向实现的。PCL 升级后，插件很可能需要重做。
-2. **示例插件只用于演示插件如何接入。** 它是参考实现，不是产品功能；本仓库不描述、也不承诺它的任何具体行为。
-3. **插件以完全信任方式运行。** 插件在 PCL 的 AppDomain 内执行，拥有与 PCL 相同的权限，等同于任意代码执行。**只安装你信任的 DLL。**
-4. **这是运行时补丁方案，不是 PCL 的官方扩展机制。** 它依赖注入 `AppDomainManager` 并修改 `exe.config`；PCL 自身未提供插件接口。
+1. **依赖具体启动器版本的精确方法签名与 IL 形态。** 官方侧针对 PCL 2.99.0.0、CE 侧针对 2.15.1.0 逆向实现。任一侧升级后，对应插件很可能需要重做。
+2. **示例插件只用于演示插件如何接入。** 它们是参考实现，不是产品功能；本仓库不描述、也不承诺它们的具体行为。
+3. **插件以完全信任方式运行。** 插件在启动器的 AppDomain 内执行，拥有与启动器相同的权限，等同于任意代码执行。**只安装你信任的 DLL。**
+4. **这是运行时补丁方案，不是启动器的官方扩展机制。** 官方 PCL 侧依赖注入 `AppDomainManager` 并修改 `exe.config`；CE 侧依赖 `DOTNET_STARTUP_HOOKS` 启动钩子。两者都未提供插件接口。
+5. **CE 侧必须通过生成的包装脚本启动。** 直接双击 exe 不会加载插件——启动钩子只能经环境变量传入，而 CE 是单文件 bundle，外部配置文件会被忽略。启动器本体始终不被修改。
+6. **跨启动器插件的补丁代码基本是两份。** 两端内部类型与方法完全不同，能共享的只有契约与调度逻辑。
 
 ---
 
 ## 许可与归属
 
 - **本仓库的加载器与示例插件源码**：MIT 许可，见 [LICENSE](./LICENSE)。
-- **Lib.Harmony**：MIT 许可，见 [pardeike/Harmony](https://github.com/pardeike/Harmony)。Release 中分发的 `0Harmony.dll`（Lib.Harmony 2.4.2 的 net48 构建）依其原许可分发。
+- **Lib.Harmony**：MIT 许可，见 [pardeike/Harmony](https://github.com/pardeike/Harmony)。Release 中分发的 `0Harmony.dll`（Lib.Harmony 2.4.2，官方侧为 net48 构建、CE 侧为 net10 构建）依其原许可分发。
 - **Plain Craft Launcher 2**：其版权归原作者所有。PCL **不是**以常见的开源许可发布——其许可证为一份限定分发范围的许可（见 PCL 仓库中的 `LICENCE`）。本仓库**不重新分发 PCL 本体**，也不包含 PCL 的源码；加载器只是在你本地的 PCL 上于运行时打补丁。使用前请自行确认你所在地区的法律法规与 PCL 的许可条款。

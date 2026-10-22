@@ -10,9 +10,20 @@
 
 ## What this is
 
-PCL Harmony is a **plugin loader**: it takes control while Plain Craft Launcher 2 ("PCL") starts up and injects [Harmony](https://github.com/pardeike/Harmony) into PCL's AppDomain, so that third-party plugins can patch PCL methods at runtime.
+PCL Harmony is a **plugin loader**: it takes control while the launcher starts up and injects [Harmony](https://github.com/pardeike/Harmony) into its AppDomain, so that third-party plugins can patch launcher methods at runtime.
 
-The repository also contains a **sample plugin** (`src/sample-plugin/`) that demonstrates how a plugin plugs in. The sample is reference material only; this document does not describe what it does.
+**Both launchers are supported:**
+
+| | Official PCL | PCL-CE |
+| --- | --- | --- |
+| Executable | `Plain Craft Launcher 2.exe` | `PCL2_CE_*.exe` |
+| Target framework | net48 (CLR 4) | net10 (CoreCLR) |
+| How control is taken | `AppDomainManager` injection | .NET startup hook |
+| Is the launcher modified? | No (only `exe.config`) | No (env var via a wrapper script) |
+
+The two runtimes are incompatible, so `libs/` carries one payload per target and `install.ps1` picks the matching one automatically. A plugin aimed at a single launcher is written the ordinary way; to make **one plugin work on both**, see [Cross-launcher plugins](#cross-launcher-plugins).
+
+The repository also contains **sample plugins** (`src/sample-plugin/`, `src/example-title/`, `src/example-shared/`) that demonstrate how a plugin plugs in. They are reference material only; this document does not describe what they do.
 
 ---
 
@@ -87,11 +98,19 @@ src/loader/                loader C# sources (net48 -> PclHarmony.dll)
   LoaderLog.cs             lazily initialised, low-cost logging (PclHarmony.log)
   IPlugin.cs               plugin interface
   PluginApi.cs             helper API exposed to plugins
-src/sample-plugin/            sample plugin C# sources (net48 -> Example.dll)
-src/example-title/             sample plugin: title-bar badge (net48 -> Example-Title.dll)
+src/contract/                 runtime-neutral plugin contract (netstandard2.0)
+  Contract.cs                 IDeclarativePlugin / PatchSpec
+src/sample-plugin/            sample plugin (net48 -> Example.dll)
+src/example-title/            sample plugin: title-bar badge (net48 -> Example-Title.dll)
+src/example-shared/           sample plugin: runs on both launchers (netstandard2.0)
+src/ce-host/                  PCL-CE loader (net8 -> PclHarmony.CeHost.dll)
+  StartupHook.cs              startup-hook entry point
+  Host.cs                     plugin scan + patch application
+libs/official/                official PCL payload (net48)
+libs/ce/                      PCL-CE payload (net10)
 install.ps1                one-shot installer (defaults to the current directory)
 uninstall.ps1              one-shot uninstaller
-build.ps1                  builds three projects and refreshes dist\
+build.ps1                  builds all projects and refreshes dist\ + libs\
 dist/                      build output (produced by build.ps1, not version controlled)
 ```
 
@@ -148,6 +167,10 @@ This repository does not contain PCL itself or its source.
    .\install.ps1 -TargetDir "D:\path\to\PCL"
    ```
 
+`install.ps1` **detects the target automatically**: `Plain Craft Launcher 2.exe` means the official launcher, `PCL2_CE_*.exe` means PCL-CE. The matching payload is taken from `libs\`.
+
+#### Official PCL
+
 `install.ps1` performs three steps and is safe to re-run:
 
 | Step | Action |
@@ -156,11 +179,23 @@ This repository does not contain PCL itself or its source.
 | 2 | Creates an **empty** `plugins\` folder (skipped when it already exists) |
 | 3 | Writes / merges the three config parts described above into `Plain Craft Launcher 2.exe.config` |
 
-The script locates `PclHarmony.dll` and `0Harmony.dll` automatically: first next to itself (the layout of a release archive), then in `dist\PclHarmony\`, then in `src\loader\bin\Release\`.
+#### PCL-CE
+
+CE's executable is a .NET apphost and **cannot take an `AppDomainManager`**, so the .NET startup hook mechanism is used instead:
+
+| Step | Action |
+| --- | --- |
+| 1 | Copies `PclHarmony.CeHost.dll`, `PclHarmony.Contract.dll`, `0Harmony.dll` |
+| 2 | Generates `Run-with-PCL-Harmony.cmd` (sets `DOTNET_STARTUP_HOOKS`, then starts CE) |
+| 3 | Creates an **empty** `plugins\` folder |
+
+**On CE you must start via `Run-with-PCL-Harmony.cmd`; double-clicking the exe will not load plugins.** The startup hook can only arrive through an environment variable, and the CE single-file bundle ignores an external `runtimeconfig.json`. The launcher binary itself is never modified.
+
+> CE is single-instance. If a CE instance is already running, a new one exits immediately and cleanly (exit code 0). That is CE's own behaviour, not a failed install.
+
+Both launchers write `PclHarmony.log` into their own folder so you can confirm the loader attached.
 
 **`install.ps1` only creates `plugins\`, it never puts a plugin in it.** The archive's own `plugins\` is just where the sample plugins come from - the script does not copy it across. To use a plugin, copy its DLL into the folder yourself.
-
-After installing, just start PCL. The loader writes `PclHarmony.log` into the PCL folder so you can confirm it attached.
 
 ### Placing plugins
 
@@ -321,6 +356,74 @@ namespace MyPlugin
 
 ---
 
+## Cross-launcher plugins
+
+To make **one DLL run on both the official launcher and PCL-CE**, two hard constraints have to be worked around.
+
+**Constraint 1 - the only common target is netstandard2.0.** The official launcher runs on CLR 4 (net48); PCL-CE runs on CoreCLR (net10). netstandard2.0 is the single framework both can load.
+
+**Constraint 2 - a netstandard2.0 plugin cannot call Harmony itself.** Lib.Harmony 2.4.2 ships no netstandard2.0 build, and reflectively driving the net48 build from a netstandard2.0 caller fails:
+
+```
+TypeLoadException: "MonoMod.Utils.Cil.ILGeneratorProxy[TTarget]" violates the
+constraint of type parameter "TTarget" (GenericArguments[0] = CecilILGenerator)
+```
+
+The identical patch logic called from a native net48 assembly works fine - the difference is the caller's runtime, not the usage.
+
+**The workaround: the plugin declares, the host applies.** A cross-launcher plugin implements `PclHarmony.Contract.IDeclarativePlugin` and only *describes* the patches it wants; each host applies them with the Harmony build matching its own runtime (net48 on the official side, net10 on the CE side).
+
+```csharp
+using System.Collections.Generic;
+using PclHarmony.Contract;
+
+public sealed class MySharedPlugin : IDeclarativePlugin
+{
+    public string Name { get { return "My.Shared.Plugin"; } }
+
+    public IEnumerable<PatchSpec> GetPatches(string hostKind, string hostVersion)
+    {
+        // hostKind is "official" or "ce" - branch as needed
+        yield return new PatchSpec
+        {
+            TypeName       = hostKind == "ce" ? "PCL.Program" : "PCL.Application",
+            MethodName     = "Main",
+            HookKind       = "postfix",              // "prefix" or "postfix"
+            HookTypeName   = typeof(MySharedPlugin).FullName,
+            HookMethodName = "AfterMain",            // must be a real static method
+        };
+    }
+
+    public static void AfterMain() { /* ... */ }
+}
+```
+
+Reference the contract only - **never Harmony**:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>MySharedPlugin</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" Private="false" />
+  </ItemGroup>
+</Project>
+```
+
+A complete working example is in `src/example-shared/`.
+
+### Guidelines
+
+- **Hooks must be named `public static` methods**, never lambdas. A compiler-generated closure (`<GetPatches>b__2_0`) makes Harmony fail even though an identical named method works.
+- **The two sides patch different methods**: the official launcher is VB (`PCL.Application.Main`), PCL-CE is C# (`PCL.Program.Main`).
+- **CE loads assemblies late**: the startup hook runs before `Main`, so `PCL.Core` and friends do not exist yet. The CE host subscribes to `AssemblyLoad` and applies patches once the target type appears.
+- **Patch logic is largely not shareable.** Only the framework and dispatch are common; the concrete patches are two separate sets.
+- **Use `hostVersion` to tell them apart**: both assemblies are named `Plain Craft Launcher 2`, so only the version distinguishes them (2.99.x vs 2.15.x).
+
+---
+
 ## Building from source
 
 Only the .NET SDK is required (the net48 reference assemblies are restored from NuGet, so Visual Studio is not needed):
@@ -348,10 +451,12 @@ Pushing to `main` builds and publishes a **pre-release** (`v<version>-dev.<run_n
 
 These are **real** constraints; understand them before relying on this project:
 
-1. **Tied to the exact method signatures and IL of PCL 2.99.0.0.** Both the loader and the sample plugin were written against that version. After a PCL upgrade, plugins will likely need rework.
-2. **The sample plugin exists only to show how a plugin plugs in.** It is reference material, not a product feature; this repository neither documents nor promises any specific behaviour of it.
-3. **Plugins run with full trust.** A plugin executes inside PCL's AppDomain with PCL's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
-4. **This is a runtime patch, not an official extension mechanism.** It relies on injecting an `AppDomainManager` and editing `exe.config`; PCL itself provides no plugin interface.
+1. **Tied to the exact method signatures and IL of specific launcher versions.** The official side targets PCL 2.99.0.0, the CE side 2.15.1.0. After either upgrade, the matching plugins will likely need rework.
+2. **The sample plugins exist only to show how a plugin plugs in.** They are reference material, not product features; this repository neither documents nor promises any specific behaviour of them.
+3. **Plugins run with full trust.** A plugin executes inside the launcher's AppDomain with the launcher's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
+4. **This is a runtime patch, not an official extension mechanism.** The official side injects an `AppDomainManager` and edits `exe.config`; the CE side uses a `DOTNET_STARTUP_HOOKS` startup hook. Neither launcher provides a plugin interface.
+5. **On PCL-CE you must start through the generated wrapper script.** Double-clicking the exe will not load plugins: the startup hook can only arrive via an environment variable, and the CE bundle ignores an external runtimeconfig.json. The launcher binary is never modified.
+6. **A cross-launcher plugin's patch code is effectively two sets.** The internal types and methods differ completely; only the contract and dispatch are shared.
 
 ---
 

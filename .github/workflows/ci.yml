@@ -175,15 +175,27 @@ jobs:
             Copy-Item -LiteralPath $f -Destination $stage -Force
           }
 
-          # Loader DLLs at the archive ROOT.
-          Copy-Item -LiteralPath 'dist/PclHarmony/PclHarmony.dll' -Destination $stage -Force
-          Copy-Item -LiteralPath 'dist/PclHarmony/0Harmony.dll'   -Destination $stage -Force
+          # One payload per launcher kind. install.ps1 detects the target and picks
+          # libs\official\ or libs\ce\; they cannot be shared because the two
+          # launchers run on incompatible runtimes (net48/CLR4 vs net10/CoreCLR) and
+          # Lib.Harmony ships a different build for each.
+          foreach ($kind in @('official', 'ce')) {
+            $dest = Join-Path $stage "libs\$kind"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            # -Path (not -LiteralPath): the source is a wildcard.
+            $payload = @(Get-ChildItem -Path "libs/$kind" -Filter '*.dll' -File -ErrorAction SilentlyContinue)
+            if ($payload.Count -eq 0) { throw "no payload DLLs found in libs/$kind" }
+            foreach ($dll in $payload) {
+              Copy-Item -LiteralPath $dll.FullName -Destination $dest -Force
+            }
+          }
 
           # Sample plugins are shipped inside plugins\, but install.ps1 never
           # touches that folder: they are manual copies, so every plugin built by
           # build.ps1 has to be listed here explicitly.
-          Copy-Item -LiteralPath 'dist/plugins/Example.dll'       -Destination (Join-Path $stage 'plugins') -Force
-          Copy-Item -LiteralPath 'dist/plugins/Example-Title.dll' -Destination (Join-Path $stage 'plugins') -Force
+          Copy-Item -LiteralPath 'dist/plugins/Example.dll'        -Destination (Join-Path $stage 'plugins') -Force
+          Copy-Item -LiteralPath 'dist/plugins/Example-Title.dll'  -Destination (Join-Path $stage 'plugins') -Force
+          Copy-Item -LiteralPath 'dist/plugins/Example.Shared.dll' -Destination (Join-Path $stage 'plugins') -Force
 
           $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
@@ -191,7 +203,7 @@ jobs:
 
           Write-Host "archive: $zip ($((Get-Item -LiteralPath $zip).Length) bytes)"
           Get-ChildItem -Recurse -File $stage |
-            ForEach-Object { "{0,-34} {1,10} bytes" -f $_.FullName.Substring($stage.Length + 1), $_.Length }
+            ForEach-Object { "{0,-40} {1,10} bytes" -f $_.FullName.Substring($stage.Length + 1), $_.Length }
 
           # Assert the contract the installer depends on.
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -199,9 +211,15 @@ jobs:
           try {
             $names = $arc.Entries | ForEach-Object { $_.FullName -replace '\\','/' }
             $required = @(
-              'install.ps1','uninstall.ps1','PclHarmony.dll','0Harmony.dll',
+              'install.ps1','uninstall.ps1',
               'README.md','README.en_US.md','LICENSE',
-              'plugins/Example.dll','plugins/Example-Title.dll'
+              'libs/official/PclHarmony.dll',
+              'libs/official/PclHarmony.Contract.dll',
+              'libs/official/0Harmony.dll',
+              'libs/ce/PclHarmony.CeHost.dll',
+              'libs/ce/PclHarmony.Contract.dll',
+              'libs/ce/0Harmony.dll',
+              'plugins/Example.dll','plugins/Example-Title.dll','plugins/Example.Shared.dll'
             )
             foreach ($r in $required) {
               if ($names -notcontains $r) { throw "archive is missing required entry at expected path: $r" }
