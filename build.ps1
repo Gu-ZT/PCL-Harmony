@@ -131,7 +131,14 @@ Copy-Item -LiteralPath $contractDll -Destination (Join-Path $LibsCe 'PclHarmony.
 
 # The CE host targets net8 but runs on the launcher's .NET 10 runtime, so it gets
 # the net10 Harmony build rather than whatever NuGet resolved for net8.
-$ceHarmony = Join-Path $env:USERPROFILE '.nuget\packages\lib.harmony\2.4.2\lib\net10.0\0Harmony.dll'
+#
+# Resolve the package cache instead of assuming the default location: NUGET_PACKAGES
+# can redirect it, and a hardcoded ~\.nuget\packages path then silently misses.
+$globalPackages = $env:NUGET_PACKAGES
+if ([string]::IsNullOrWhiteSpace($globalPackages)) {
+    $globalPackages = Join-Path $env:USERPROFILE '.nuget\packages'
+}
+$ceHarmony = Join-Path $globalPackages 'lib.harmony\2.4.2\lib\net10.0\0Harmony.dll'
 if (-not (Test-Path -LiteralPath $ceHarmony -PathType Leaf)) {
     Write-Fail "net10 0Harmony not found at $ceHarmony (restore Lib.Harmony first)"
     exit 1

@@ -19,8 +19,33 @@
     <Nullable>disable</Nullable>
     <NoWarn>CS0618;CS1701;CS1702;NU1701</NoWarn>
     <Deterministic>true</Deterministic>
-    <_WpfRefDir>$(NuGetPackageRoot)microsoft.netframework.referenceassemblies.net48\1.0.3\build\.NETFramework\v4.8</_WpfRefDir>
+    <_WpfRefPackage>microsoft.netframework.referenceassemblies.net48</_WpfRefPackage>
+    <_WpfRefVersion>1.0.3</_WpfRefVersion>
+    <!-- Path.Combine, not string concatenation: NuGetPackageRoot does not always end
+         with a separator (it does not when the cache is redirected via the
+         NUGET_PACKAGES environment variable), so joining by hand silently produced a
+         path with the folder name glued onto the root. -->
+    <_WpfRefDir>$([System.IO.Path]::Combine($(NuGetPackageRoot), '$(_WpfRefPackage)', '$(_WpfRefVersion)', 'build', '.NETFramework', 'v4.8'))</_WpfRefDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Restores the .NET Framework reference assemblies, which is where WPF lives.
+
+      This MUST be explicit: the SDK only adds this package automatically for
+      .NET Framework target frameworks, and this project targets netstandard2.0.
+      Without it the reference paths below only resolve on a machine that happens
+      to have the package cached already (for example because a sibling net48
+      project restored it), and a clean checkout fails with MSB3245 plus a wall of
+      "type or namespace does not exist" errors.
+
+      PrivateAssets=all: it is a build-time-only dependency, nothing to flow.
+    -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
   <ItemGroup>
     <!-- Private=false everywhere: the plugin must never ship its own copy of WPF or
          of the contract, the launcher and loader already provide them. -->
@@ -42,4 +67,11 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <!-- Fail with a clear message instead of a pile of CS0234s when the reference
+       assemblies really are missing. -->
+  <Target Name="_VerifyWpfReferences" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(_WpfRefDir)\PresentationFramework.dll')"
+           Text="WPF reference assemblies not found at $(_WpfRefDir). Expected the $(_WpfRefPackage) package to be restored; run 'dotnet restore' first." />
+  </Target>
 </Project>
