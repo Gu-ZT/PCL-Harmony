@@ -1,11 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using HarmonyLib;
-using PclHarmony;
+using PclHarmony.Contract;
 
 namespace PclExampleTitlePlugin
 {
@@ -23,7 +23,7 @@ namespace PclExampleTitlePlugin
     /// (FormattedText.BuildGeometry) and the plate is built with
     /// CombinedGeometry(Exclude).
     /// </summary>
-    public sealed class TitleBadge : IPlugin
+    public sealed class TitleBadge : IDeclarativePlugin
     {
         public string Name { get { return "PCL.Example.TitleBadge"; } }
 
@@ -40,6 +40,7 @@ namespace PclExampleTitlePlugin
         private const double SizeRatio = 0.62;
 
         private static Assembly _target;
+        private static IPluginHost _host;
 
         // Typography borrowed from the launcher's text-form wordmark, kept so the
         // badge and the descender correction stay in step even when the visible
@@ -47,106 +48,137 @@ namespace PclExampleTitlePlugin
         private static double _typographySize = 17;
         private static Typeface _typographyFace;
 
-        public void Load(Harmony harmony, Assembly target)
+        internal static void Log(string message)
         {
-            _target = target;
+            try { if (_host != null) _host.Log("[Example-Title] " + message); } catch { }
+        }
 
-            MethodInfo refresh = FindTitleRefresh();
-            if (refresh == null)
+        /// <summary>
+        /// The launcher assembly, resolved lazily.
+        ///
+        /// This cannot be captured while declaring patches: on PCL-CE the hook runs
+        /// before the launcher assembly is loaded. The hooks only need it once they
+        /// actually run, by which point it is present.
+        /// </summary>
+        private static Assembly Target
+        {
+            get
             {
-                PluginApi.Log("[Example-Title] title refresh method not found; badge disabled");
+                if (_target != null) return _target;
+                foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (a.GetName().Name == "Plain Craft Launcher 2") { _target = a; break; }
+                    }
+                    catch { }
+                }
+                return _target;
+            }
+        }
+
+        public IEnumerable<PatchSpec> GetPatches(string hostKind, string hostVersion, IPluginHost host)
+        {
+            _host = host;
+            Log("declaring patches for host=" + hostKind + " version=" + hostVersion);
+
+            var specs = new List<PatchSpec>();
+            if (string.Equals(hostKind, "ce", StringComparison.OrdinalIgnoreCase))
+            {
+                // PCL-CE: the window's Loaded handler is the point where the title bar
+                // controls exist and are laid out.
+                specs.Add(new PatchSpec
+                {
+                    TypeName = "PCL.FormMain",
+                    MethodName = "FormMain_Loaded",
+                    HookKind = "postfix",
+                    HookTypeName = typeof(TitleBadge).FullName,
+                    HookMethodName = "AfterCeWindowLoaded",
+                });
+            }
+            else
+            {
+                specs.Add(new PatchSpec
+                {
+                    TypeName = "PCL.FormMain",
+                    MethodName = "UpdateBackgroundAndTitleBar",
+                    HookKind = "postfix",
+                    HookTypeName = typeof(TitleBadge).FullName,
+                    HookMethodName = "AfterTitleRefresh",
+                    // Two overloads share this name: the parameterless instance method
+                    // that refreshes the bar, and a static one taking the changed
+                    // setting. Only the instance one runs at startup, so pin the
+                    // parameter list to zero arguments.
+                    TargetParameterTypes = new string[0],
+                });
+            }
+            return specs;
+        }
+
+        /// <summary>
+        /// Runs after the official launcher has refreshed its title bar. Never throws
+        /// into the launcher: a decoration must not be able to break startup.
+        /// </summary>
+        public static void AfterTitleRefresh(object __instance)
+        {
+            try { Attach(__instance, null); }
+            catch (Exception ex)
+            {
+                Log("attach failed (launcher unaffected): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Runs after PCL-CE's main window has loaded. Anchors to the CE mark, which
+        /// is the element that follows the wordmark in that title bar.
+        /// </summary>
+        public static void AfterCeWindowLoaded(object __instance)
+        {
+            try { Attach(__instance, "CELogo"); }
+            catch (Exception ex)
+            {
+                Log("attach failed (launcher unaffected): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Adds the badge next to the title mark.
+        /// </summary>
+        /// <param name="anchorName">
+        /// Control to sit after. Null picks whichever wordmark form is visible.
+        /// </param>
+        private static void Attach(object formMain, string anchorName)
+        {
+            FrameworkElement anchor;
+            if (anchorName != null)
+            {
+                anchor = GetProp(formMain, anchorName) as FrameworkElement;
+            }
+            else
+            {
+                // The launcher renders its wordmark in one of three ways depending on
+                // the UiLogoType setting: a vector Path (1), a TextBlock (2), or an
+                // image (3). Only one is visible at a time, so the badge anchors to
+                // whichever that is.
+                anchor = FirstVisible(
+                    GetProp(formMain, "ShapeTitleLogo") as FrameworkElement,
+                    GetProp(formMain, "LabTitleLogo") as FrameworkElement,
+                    GetProp(formMain, "ImageTitleLogo") as FrameworkElement);
+            }
+
+            if (anchor == null)
+            {
+                Log("title mark '" + (anchorName ?? "(visible wordmark)") + "' not found; badge skipped");
                 return;
             }
 
-            harmony.Patch(refresh, null, new HarmonyMethod(P("AfterTitleRefresh")), null);
-            PluginApi.Log("[Example-Title] badge attached to "
-                          + refresh.DeclaringType.Name + "." + refresh.Name);
-        }
-
-        /// <summary>
-        /// Locates the method that assigns the title wordmark. The title text comes
-        /// from user settings and is re-applied whenever they change, so hooking that
-        /// assignment is both "the control exists" and "the font is current".
-        /// </summary>
-        private static MethodInfo FindTitleRefresh()
-        {
-            try
-            {
-                var frm = T("PCL.FormMain");
-                if (frm == null) return null;
-
-                // Preferred: the known title-bar refresh routine.
-                var m = frm.GetMethod("UpdateBackgroundAndTitleBar",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (m != null) return m;
-
-                // Fallback: the parameterless method that calls the LabTitleLogo setter.
-                var labelProp = frm.GetProperty("LabTitleLogo",
-                    BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                var setter = labelProp == null ? null : labelProp.GetSetMethod(true);
-                if (setter == null) return null;
-
-                foreach (var candidate in frm.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
-                                                         | BindingFlags.Instance
-                                                         | BindingFlags.DeclaredOnly))
-                {
-                    if (candidate.GetParameters().Length != 0) continue;
-                    if (candidate.ReturnType != typeof(void)) continue;
-
-                    byte[] il;
-                    try { il = candidate.GetMethodBody() == null ? null : candidate.GetMethodBody().GetILAsByteArray(); }
-                    catch { continue; }
-                    if (il == null) continue;
-
-                    for (int i = 0; i + 4 < il.Length; i++)
-                    {
-                        if (il[i] != 0x6F && il[i] != 0x28) continue;   // callvirt / call
-                        if (BitConverter.ToInt32(il, i + 1) == setter.MetadataToken) return candidate;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                PluginApi.Log("[Example-Title] lookup failed: " + ex.GetType().Name + ": " + ex.Message);
-            }
-            return null;
-        }
-
-        /// <summary>
-        /// Runs after the title has been refreshed. Never throws into the launcher:
-        /// a decoration must not be able to break startup.
-        /// </summary>
-        private static void AfterTitleRefresh(object __instance)
-        {
-            try { Attach(__instance); }
-            catch (Exception ex)
-            {
-                PluginApi.Log("[Example-Title] attach failed (launcher unaffected): "
-                              + ex.GetType().Name + ": " + ex.Message);
-            }
-        }
-
-        private static void Attach(object formMain)
-        {
-            var host = GetProp(formMain, "PanTitleMain") as Panel;
+            // The panel that actually owns the anchor. It is not always PanTitleMain:
+            // on PCL-CE the CE mark lives inside the nested wordmark grid, so taking
+            // the parent from the anchor is the only reliable way.
+            var host = anchor.Parent as Panel;
             if (host == null)
             {
-                PluginApi.Log("[Example-Title] PanTitleMain unavailable; badge skipped");
-                return;
-            }
-
-            // The launcher renders its wordmark in one of three ways depending on
-            // the UiLogoType setting: a vector Path (1), a TextBlock (2), or an
-            // image (3). Only one is visible at a time, so the badge anchors to
-            // whichever that is.
-            FrameworkElement wordmark = FirstVisible(
-                GetProp(formMain, "ShapeTitleLogo") as FrameworkElement,
-                GetProp(formMain, "LabTitleLogo") as FrameworkElement,
-                GetProp(formMain, "ImageTitleLogo") as FrameworkElement);
-
-            if (wordmark == null)
-            {
-                PluginApi.Log("[Example-Title] no visible wordmark; badge skipped");
+                Log("title mark '" + anchor.GetType().Name + "' has no panel parent; badge skipped");
                 return;
             }
 
@@ -169,12 +201,11 @@ namespace PclExampleTitlePlugin
                 badge.VerticalAlignment = VerticalAlignment.Center;
                 badge.Margin = new Thickness(8, 0, 0, 0);
                 badge.IsHitTestVisible = false;   // never steal clicks from the title bar
-                PlaceAfter(host, wordmark, badge);
+                PlaceAfter(host, anchor, badge);
             }
 
-            PluginApi.Log("[Example-Title] badge placed after " + wordmark.GetType().Name
-                          + " size=" + (badge as FrameworkElement).Width
-                          + "x" + (badge as FrameworkElement).Height);
+            Log("badge placed after " + anchor.GetType().Name
+                + " size=" + badge.Width + "x" + badge.Height);
         }
 
         private static FrameworkElement FirstVisible(params FrameworkElement[] candidates)
@@ -370,23 +401,18 @@ namespace PclExampleTitlePlugin
         }
 
         // ---------------------------------------------------------- helpers ---
-        private static Type T(string full)
-        {
-            return _target == null ? null : _target.GetType(full, false);
-        }
-
         private static object GetProp(object instance, string name)
         {
             if (instance == null) return null;
-            var p = instance.GetType().GetProperty(name,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            return p == null ? null : p.GetValue(instance, null);
-        }
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
-        private static MethodInfo P(string name)
-        {
-            return typeof(TitleBadge).GetMethod(name,
-                BindingFlags.NonPublic | BindingFlags.Static);
+            // WPF's x:Name generates a FIELD in C# but a PROPERTY in VB, and the two
+            // launchers are written in different languages - so check both.
+            PropertyInfo p = instance.GetType().GetProperty(name, flags);
+            if (p != null) return p.GetValue(instance, null);
+
+            FieldInfo f = instance.GetType().GetField(name, flags);
+            return f == null ? null : f.GetValue(instance);
         }
     }
 }

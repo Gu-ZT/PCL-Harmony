@@ -195,7 +195,6 @@ jobs:
           # build.ps1 has to be listed here explicitly.
           Copy-Item -LiteralPath 'dist/plugins/Example.dll'        -Destination (Join-Path $stage 'plugins') -Force
           Copy-Item -LiteralPath 'dist/plugins/Example-Title.dll'  -Destination (Join-Path $stage 'plugins') -Force
-          Copy-Item -LiteralPath 'dist/plugins/Example.Shared.dll' -Destination (Join-Path $stage 'plugins') -Force
 
           $zip = Join-Path $env:RUNNER_TEMP 'PCL-Harmony.zip'
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
@@ -219,7 +218,7 @@ jobs:
               'libs/ce/PclHarmony.CeHost.dll',
               'libs/ce/PclHarmony.Contract.dll',
               'libs/ce/0Harmony.dll',
-              'plugins/Example.dll','plugins/Example-Title.dll','plugins/Example.Shared.dll'
+              'plugins/Example.dll','plugins/Example-Title.dll'
             )
             foreach ($r in $required) {
               if ($names -notcontains $r) { throw "archive is missing required entry at expected path: $r" }

@@ -23,7 +23,7 @@ PCL Harmony 是一个 **插件加载器**：它在启动器启动的过程中取
 
 两者运行时互不兼容，因此 `libs/` 下按目标各放一套载荷，`install.ps1` 会自动识别并选用。插件若只针对其中一个启动器，按普通插件写即可；若想**一份插件两端通用**，见「[跨启动器插件](#跨启动器插件)」。
 
-仓库同时包含**示例插件**（`src/sample-plugin/`、`src/example-title/`、`src/example-shared/`），用于演示插件如何接入。示例插件只作参考用途，本文不介绍它们的具体功能。
+仓库同时包含两个**示例插件**（`src/sample-plugin/`、`src/example-title/`），演示声明式插件如何接入：声明补丁点、按启动器分支、以及在标题栏里挂一个 WPF 元素。两者都编译为 netstandard2.0，同一份 DLL 在两个启动器上都能用。
 
 ---
 
@@ -106,9 +106,8 @@ src/ce-host/               PCL-CE 加载器（net8，输出 PclHarmony.CeHost.dl
   StartupHook.cs           启动钩子入口（全局 StartupHook 类型）
   Host.cs                  plugins\ 扫描、按 PatchSpec 应用补丁
 
-src/sample-plugin/         示例插件（net48，输出 Example.dll）
-src/example-title/         示例插件：标题栏标记（net48，输出 Example-Title.dll）
-src/example-shared/        示例插件：跨启动器通用（netstandard2.0，输出 Example.Shared.dll）
+src/sample-plugin/         示例插件（netstandard2.0，输出 Example.dll）
+src/example-title/         示例插件：标题栏标记（netstandard2.0，输出 Example-Title.dll）
 
 install.ps1                一键安装（自动识别目标；省略 -TargetDir 时用当前目录）
 uninstall.ps1              一键卸载
@@ -156,7 +155,7 @@ dist/                      构建产物（由 build.ps1 生成，不纳入版本
    install.ps1   uninstall.ps1   README.md
    libs\official\   PclHarmony.dll   PclHarmony.Contract.dll   0Harmony.dll
    libs\ce\         PclHarmony.CeHost.dll   PclHarmony.Contract.dll   0Harmony.dll
-   plugins\Example.dll   plugins\Example-Title.dll   plugins\Example.Shared.dll
+   plugins\Example.dll   plugins\Example-Title.dll
    ```
 
 2. 关闭正在运行的启动器。
@@ -456,7 +455,7 @@ public sealed class MySharedPlugin : IDeclarativePlugin
 </Project>
 ```
 
-完整可运行示例见 `src/example-shared/`。
+完整可运行示例见 `src/sample-plugin/` 与 `src/example-title/`。
 
 ### 编写要点
 
@@ -501,7 +500,7 @@ cd PCL-Harmony
 以下限制都是**真实存在**的，请在依赖本方案前先了解：
 
 1. **依赖具体启动器版本的精确方法签名与 IL 形态。** 官方侧针对 PCL 2.99.0.0、CE 侧针对 2.15.1.0 逆向实现。任一侧升级后，对应插件很可能需要重做。
-2. **示例插件只用于演示插件如何接入。** 它们是参考实现，不是产品功能；本仓库不描述、也不承诺它们的具体行为。
+2. **示例插件是参考实现，不是产品功能。** 它们用来演示插件如何接入，按需取用。
 3. **插件以完全信任方式运行。** 插件在启动器的 AppDomain 内执行，拥有与启动器相同的权限，等同于任意代码执行。**只安装你信任的 DLL。**
 4. **这是运行时补丁方案，不是启动器的官方扩展机制。** 官方 PCL 侧依赖注入 `AppDomainManager` 并修改 `exe.config`；CE 侧依赖 `DOTNET_STARTUP_HOOKS` 启动钩子。两者都未提供插件接口。
 5. **CE 侧必须通过生成的包装脚本启动。** 直接双击 exe 不会加载插件——启动钩子只能经环境变量传入，而 CE 是单文件 bundle，外部配置文件会被忽略。启动器本体始终不被修改。

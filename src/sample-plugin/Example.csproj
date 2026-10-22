@@ -1,25 +1,24 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    netstandard2.0 on purpose: it is the only framework both launchers can load
+    (the official one runs on CLR 4, PCL-CE on CoreCLR). Harmony therefore cannot
+    be referenced at all - patches are declared and the host applies them.
+  -->
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <TargetFramework>netstandard2.0</TargetFramework>
     <OutputType>Library</OutputType>
     <AssemblyName>Example</AssemblyName>
     <RootNamespace>PclExamplePlugin</RootNamespace>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <UseWindowsForms>false</UseWindowsForms>
-    <UseWPF>true</UseWPF>
     <Nullable>disable</Nullable>
     <NoWarn>CS0618</NoWarn>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Both references must be Private=false: the plugin never ships its own copy of
-         0Harmony or PclHarmony. A second identity of those assemblies would break the
-         IPlugin cast and make Harmony patches target a foreign Assembly instance. -->
-    <PackageReference Include="Lib.Harmony" Version="2.4.2" ExcludeAssets="runtime" />
-    <ProjectReference Include="..\loader\PclHarmony.csproj">
-      <Private>false</Private>
-    </ProjectReference>
+    <!-- Private=false: the plugin never ships its own copy of the contract, the
+         launcher already provides it. -->
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" Private="false" />
   </ItemGroup>
 </Project>

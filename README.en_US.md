@@ -23,7 +23,7 @@ PCL Harmony is a **plugin loader**: it takes control while the launcher starts u
 
 The two runtimes are incompatible, so `libs/` carries one payload per target and `install.ps1` picks the matching one automatically. A plugin aimed at a single launcher is written the ordinary way; to make **one plugin work on both**, see [Cross-launcher plugins](#cross-launcher-plugins).
 
-The repository also contains **sample plugins** (`src/sample-plugin/`, `src/example-title/`, `src/example-shared/`) that demonstrate how a plugin plugs in. They are reference material only; this document does not describe what they do.
+The repository also contains two **sample plugins** (`src/sample-plugin/`, `src/example-title/`) that demonstrate how a declarative plugin plugs in: declaring patch points, branching per launcher, and attaching a WPF element to the title bar. Both target netstandard2.0, so the same DLL works on either launcher.
 
 ---
 
@@ -99,10 +99,10 @@ src/loader/                loader C# sources (net48 -> PclHarmony.dll)
   IPlugin.cs               plugin interface
   PluginApi.cs             helper API exposed to plugins
 src/contract/                 runtime-neutral plugin contract (netstandard2.0)
-  Contract.cs                 IDeclarativePlugin / PatchSpec
-src/sample-plugin/            sample plugin (net48 -> Example.dll)
-src/example-title/            sample plugin: title-bar badge (net48 -> Example-Title.dll)
-src/example-shared/           sample plugin: runs on both launchers (netstandard2.0)
+  Contract.cs                 IDeclarativePlugin / PatchSpec / IPluginHost
+src/sample-plugin/            sample plugin (netstandard2.0 -> Example.dll)
+src/example-title/            sample plugin: title-bar badge (netstandard2.0)
+
 src/ce-host/                  PCL-CE loader (net8 -> PclHarmony.CeHost.dll)
   StartupHook.cs              startup-hook entry point
   Host.cs                     plugin scan + patch application
@@ -412,7 +412,7 @@ Reference the contract only - **never Harmony**:
 </Project>
 ```
 
-A complete working example is in `src/example-shared/`.
+Complete working examples are in `src/sample-plugin/` and `src/example-title/`.
 
 ### Guidelines
 
@@ -452,7 +452,7 @@ Pushing to `main` builds and publishes a **pre-release** (`v<version>-dev.<run_n
 These are **real** constraints; understand them before relying on this project:
 
 1. **Tied to the exact method signatures and IL of specific launcher versions.** The official side targets PCL 2.99.0.0, the CE side 2.15.1.0. After either upgrade, the matching plugins will likely need rework.
-2. **The sample plugins exist only to show how a plugin plugs in.** They are reference material, not product features; this repository neither documents nor promises any specific behaviour of them.
+2. **The sample plugins are reference implementations, not product features.** They show how a plugin plugs in; use them as needed.
 3. **Plugins run with full trust.** A plugin executes inside the launcher's AppDomain with the launcher's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
 4. **This is a runtime patch, not an official extension mechanism.** The official side injects an `AppDomainManager` and edits `exe.config`; the CE side uses a `DOTNET_STARTUP_HOOKS` startup hook. Neither launcher provides a plugin interface.
 5. **On PCL-CE you must start through the generated wrapper script.** Double-clicking the exe will not load plugins: the startup hook can only arrive via an environment variable, and the CE bundle ignores an external runtimeconfig.json. The launcher binary is never modified.

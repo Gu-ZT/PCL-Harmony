@@ -44,7 +44,6 @@ $LoaderProject   = Join-Path $RepoRoot 'src\loader\PclHarmony.csproj'
 $CeHostProject   = Join-Path $RepoRoot 'src\ce-host\CeHost.csproj'
 $SampleProject   = Join-Path $RepoRoot 'src\sample-plugin\Example.csproj'
 $TitleProject    = Join-Path $RepoRoot 'src\example-title\Example-Title.csproj'
-$SharedProject   = Join-Path $RepoRoot 'src\example-shared\Example.Shared.csproj'
 
 $LoaderOut   = Join-Path $RepoRoot 'dist\PclHarmony'
 $PluginsOut  = Join-Path $RepoRoot 'dist\plugins'
@@ -52,7 +51,7 @@ $LibsOfficial = Join-Path $RepoRoot 'libs\official'
 $LibsCe       = Join-Path $RepoRoot 'libs\ce'
 
 $AllProjects = @($ContractProject, $LoaderProject, $CeHostProject,
-                 $SampleProject, $TitleProject, $SharedProject)
+                 $SampleProject, $TitleProject)
 
 function Write-Step([string]$Message) { Write-Host "[build] $Message" }
 function Write-Fail([string]$Message) { Write-Host "[build] ERROR: $Message" -ForegroundColor Red }
@@ -88,7 +87,6 @@ $loaderDir  = Join-Path $RepoRoot "src\loader\bin\$Configuration"
 $ceHostDir  = Join-Path $RepoRoot "src\ce-host\bin\$Configuration"
 $sampleDir  = Join-Path $RepoRoot "src\sample-plugin\bin\$Configuration"
 $titleDir   = Join-Path $RepoRoot "src\example-title\bin\$Configuration"
-$sharedDir  = Join-Path $RepoRoot "src\example-shared\bin\$Configuration"
 
 $loaderDll  = Join-Path $loaderDir 'PclHarmony.dll'
 $harmonyDll = Join-Path $loaderDir '0Harmony.dll'
@@ -96,10 +94,9 @@ $ceHostDll  = Join-Path $ceHostDir 'PclHarmony.CeHost.dll'
 $contractDll = Join-Path $loaderDir 'PclHarmony.Contract.dll'
 $sampleDll  = Join-Path $sampleDir 'Example.dll'
 $titleDll   = Join-Path $titleDir  'Example-Title.dll'
-$sharedDll  = Join-Path $sharedDir 'Example.Shared.dll'
 
 foreach ($artifact in @($loaderDll, $harmonyDll, $ceHostDll, $contractDll,
-                        $sampleDll, $titleDll, $sharedDll)) {
+                        $sampleDll, $titleDll)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         Write-Fail "expected build output missing: $artifact"
         exit 1
@@ -115,13 +112,11 @@ Copy-Item -LiteralPath $loaderDll  -Destination (Join-Path $LoaderOut 'PclHarmon
 Copy-Item -LiteralPath $harmonyDll -Destination (Join-Path $LoaderOut '0Harmony.dll')    -Force
 Copy-Item -LiteralPath $sampleDll  -Destination (Join-Path $PluginsOut 'Example.dll')     -Force
 Copy-Item -LiteralPath $titleDll   -Destination (Join-Path $PluginsOut 'Example-Title.dll') -Force
-Copy-Item -LiteralPath $sharedDll  -Destination (Join-Path $PluginsOut 'Example.Shared.dll') -Force
 
 Write-Step "refreshed dist\PclHarmony\PclHarmony.dll ($((Get-Item (Join-Path $LoaderOut 'PclHarmony.dll')).Length) bytes)"
 Write-Step "refreshed dist\PclHarmony\0Harmony.dll   ($((Get-Item (Join-Path $LoaderOut '0Harmony.dll')).Length) bytes)"
 Write-Step "refreshed dist\plugins\Example.dll       ($((Get-Item (Join-Path $PluginsOut 'Example.dll')).Length) bytes)"
 Write-Step "refreshed dist\plugins\Example-Title.dll ($((Get-Item (Join-Path $PluginsOut 'Example-Title.dll')).Length) bytes)"
-Write-Step "refreshed dist\plugins\Example.Shared.dll ($((Get-Item (Join-Path $PluginsOut 'Example.Shared.dll')).Length) bytes)"
 
 # ------------------------------------------------------------------------- libs ---
 # One payload per launcher kind. The two runtimes are incompatible and Harmony
@@ -173,8 +168,7 @@ if (-not $SkipTests) {
         @{ Path = Join-Path $LibsCe     'PclHarmony.CeHost.dll';   Name = 'PclHarmony.CeHost'   },
         @{ Path = Join-Path $LibsCe     'PclHarmony.Contract.dll'; Name = 'PclHarmony.Contract' },
         @{ Path = Join-Path $PluginsOut 'Example.dll';             Name = 'Example'             },
-        @{ Path = Join-Path $PluginsOut 'Example-Title.dll';       Name = 'Example-Title'       },
-        @{ Path = Join-Path $PluginsOut 'Example.Shared.dll';      Name = 'Example.Shared'      }
+        @{ Path = Join-Path $PluginsOut 'Example-Title.dll';       Name = 'Example-Title'       }
     )
     foreach ($item in $expected) {
         $asmName = [System.Reflection.AssemblyName]::GetAssemblyName($item.Path)

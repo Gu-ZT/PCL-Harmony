@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Text;
 using System.Threading;
 using HarmonyLib;
@@ -157,6 +158,18 @@ namespace PclHarmony.Ce
             }
         }
 
+        /// <summary>
+        /// Host services handed to declarative plugins: the plugin cannot reference
+        /// this host directly (it must also load on the official launcher), so
+        /// logging comes through the contract.
+        /// </summary>
+        private sealed class CeHostServices : IPluginHost
+        {
+            public void Log(string message) { Host.Log(message); }
+        }
+
+        private static readonly IPluginHost HostServices = new CeHostServices();
+
         private static void CollectPatches()
         {
             string launcherVersion = "(unknown)";
@@ -167,7 +180,7 @@ namespace PclHarmony.Ce
             {
                 try
                 {
-                    var specs = plugin.GetPatches(HostKind, launcherVersion);
+                    var specs = plugin.GetPatches(HostKind, launcherVersion, HostServices);
                     if (specs == null) continue;
                     foreach (var spec in specs)
                     {
@@ -260,6 +273,22 @@ namespace PclHarmony.Ce
             }
 
             var harmony = GetHarmony();
+            if (string.Equals(spec.HookKind, "redirect", StringComparison.OrdinalIgnoreCase))
+            {
+                int redirected = RedirectCallSites(harmony, target, hook);
+                if (redirected == 0)
+                {
+                    item.Failed = true;
+                    Log("no call sites of " + spec.TypeName + "." + spec.MethodName + " to redirect");
+                    return;
+                }
+                item.Applied = true;
+                Log("applied redirect " + spec.TypeName + "." + spec.MethodName
+                    + " -> " + spec.HookTypeName + "." + spec.HookMethodName
+                    + " (" + redirected + " call site(s), plugin '" + item.Plugin + "')");
+                return;
+            }
+
             var hm = new HarmonyMethod(hook);
             bool prefix = string.Equals(spec.HookKind, "prefix", StringComparison.OrdinalIgnoreCase);
             if (prefix) harmony.Patch(target, hm, null, null);
@@ -270,14 +299,159 @@ namespace PclHarmony.Ce
                 + " (plugin '" + item.Plugin + "')");
         }
 
+        /// <summary>
+        /// Rewrites every call to <paramref name="target"/> into a call to
+        /// <paramref name="replacement"/>.
+        ///
+        /// Needed for targets whose IL cannot be patched (no `ret` left once the
+        /// compiler folded every return away): Harmony's IL copier walks off the end.
+        /// Their callers are ordinary methods and can be rewritten. The replacement
+        /// takes the same arguments and returns `object`; a cast restores the declared
+        /// return type so the stack shape matches the original call.
+        ///
+        /// Kept in step with the net48 loader so the contract behaves identically on
+        /// both launchers.
+        /// </summary>
+        private static int RedirectCallSites(Harmony harmony, MethodInfo target, MethodInfo replacement)
+        {
+            MethodInfo transpilerMethod = typeof(Host).GetMethod("RedirectTranspiler",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (transpilerMethod == null) return 0;
+            var transpiler = new HarmonyMethod(transpilerMethod);
+
+            Assembly host = target.DeclaringType == null ? null : target.DeclaringType.Assembly;
+            if (host == null) return 0;
+
+            Type[] types;
+            try { types = host.GetTypes(); }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = (ex.Types ?? new Type[0]).Where(t => t != null).ToArray();
+            }
+
+            int redirected = 0;
+            var seen = new HashSet<MethodBase>();
+
+            foreach (Type type in types)
+            {
+                MethodBase[] methods;
+                try
+                {
+                    methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
+                                              | BindingFlags.Static | BindingFlags.Instance
+                                              | BindingFlags.DeclaredOnly);
+                }
+                catch { continue; }
+
+                foreach (MethodBase m in methods)
+                {
+                    if (m == null || m.ContainsGenericParameters) continue;
+                    if (ReferenceEquals(m, target)) continue;
+                    if (!seen.Add(m)) continue;
+                    if (!CallsMethod(m, target)) continue;
+
+                    try
+                    {
+                        _redirectTarget = target;
+                        _redirectReplacement = replacement;
+                        harmony.Patch(m, null, null, transpiler);
+                        redirected++;
+                        Log("  redirect call site in " + type.FullName + "." + m.Name);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("  redirect failed for " + type.FullName + "." + m.Name + ": " + Describe(ex));
+                    }
+                }
+            }
+            return redirected;
+        }
+
+        private static MethodInfo _redirectTarget;
+        private static MethodInfo _redirectReplacement;
+
+        private static IEnumerable<CodeInstruction> RedirectTranspiler(
+            IEnumerable<CodeInstruction> instructions)
+        {
+            MethodInfo target = _redirectTarget;
+            MethodInfo replacement = _redirectReplacement;
+            Type returnType = target == null ? typeof(void) : target.ReturnType;
+
+            foreach (CodeInstruction ci in instructions)
+            {
+                var called = ci.operand as MethodInfo;
+                bool isCall = ci.opcode == OpCodes.Call || ci.opcode == OpCodes.Callvirt;
+                if (called == null || !isCall || !SameMethod(called, target))
+                {
+                    yield return ci;
+                    continue;
+                }
+
+                // The call can itself be a branch target; a fresh CodeInstruction has
+                // no labels, so carry them (and exception blocks) over or Harmony fails
+                // with "bad label content".
+                var rewritten = new CodeInstruction(OpCodes.Call, replacement);
+                rewritten.labels.AddRange(ci.labels);
+                rewritten.blocks.AddRange(ci.blocks);
+                yield return rewritten;
+
+                if (returnType != typeof(void) && returnType != typeof(object))
+                {
+                    yield return returnType.IsValueType
+                        ? new CodeInstruction(OpCodes.Unbox_Any, returnType)
+                        : new CodeInstruction(OpCodes.Castclass, returnType);
+                }
+            }
+        }
+
+        private static bool SameMethod(MethodInfo a, MethodInfo b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+            return a.MetadataToken == b.MetadataToken && ReferenceEquals(a.Module, b.Module);
+        }
+
+        /// <summary>Cheap IL scan: does this method body reference the given method token?</summary>
+        private static bool CallsMethod(MethodBase method, MethodInfo callee)
+        {
+            try
+            {
+                MethodBody body = method.GetMethodBody();
+                if (body == null) return false;
+                byte[] bytes = body.GetILAsByteArray();
+                if (bytes == null || bytes.Length < 5) return false;
+
+                Module module = method.Module;
+                int token = callee.MetadataToken;
+
+                for (int i = 1; i + 4 <= bytes.Length; i++)
+                {
+                    if (bytes[i] != (byte)(token & 0xFF)) continue;
+                    if (bytes[i + 1] != (byte)((token >> 8) & 0xFF)) continue;
+                    if (bytes[i + 2] != (byte)((token >> 16) & 0xFF)) continue;
+                    if (bytes[i + 3] != (byte)((token >> 24) & 0xFF)) continue;
+
+                    byte op = bytes[i - 1];
+                    if (op != 0x28 && op != 0x6F) continue;   // call / callvirt
+                    try
+                    {
+                        if (module.ResolveMethod(token) == callee) return true;
+                    }
+                    catch { return true; }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static MethodInfo FindMethod(Type type, string name, string[] paramTypeNames)
         {
             var candidates = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
                                              | BindingFlags.Static | BindingFlags.Instance)
                                  .Where(m => m.Name == name).ToArray();
             if (candidates.Length == 0) return null;
-            if (candidates.Length == 1) return candidates[0];
-            if (paramTypeNames == null || paramTypeNames.Length == 0) return candidates[0];
+            // null = no constraint; an empty array means "takes no parameters".
+            if (paramTypeNames == null) return candidates[0];
 
             foreach (var m in candidates)
             {

@@ -1,24 +1,45 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    netstandard2.0 on purpose: it is the only framework both launchers can load
+    (the official one runs on CLR 4, PCL-CE on CoreCLR). Harmony therefore cannot
+    be referenced at all - patches are declared and the host applies them.
+
+    WPF is referenced from the .NET Framework reference assemblies because
+    netstandard2.0 does not include it. The resulting assembly resolves those types
+    from whichever WPF the running launcher provides; verified to work on both.
+  -->
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <TargetFramework>netstandard2.0</TargetFramework>
     <OutputType>Library</OutputType>
     <AssemblyName>Example-Title</AssemblyName>
     <RootNamespace>PclExampleTitlePlugin</RootNamespace>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <UseWindowsForms>false</UseWindowsForms>
-    <UseWPF>true</UseWPF>
     <Nullable>disable</Nullable>
-    <NoWarn>CS0618</NoWarn>
+    <NoWarn>CS0618;CS1701;CS1702;NU1701</NoWarn>
     <Deterministic>true</Deterministic>
+    <_WpfRefDir>$(NuGetPackageRoot)microsoft.netframework.referenceassemblies.net48\1.0.3\build\.NETFramework\v4.8</_WpfRefDir>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Same rule as the sample plugin: never ship a second copy of 0Harmony or
-         PclHarmony, the identity has to stay identical to the loader's. -->
-    <PackageReference Include="Lib.Harmony" Version="2.4.2" ExcludeAssets="runtime" />
-    <ProjectReference Include="..\loader\PclHarmony.csproj">
+    <!-- Private=false everywhere: the plugin must never ship its own copy of WPF or
+         of the contract, the launcher and loader already provide them. -->
+    <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" Private="false" />
+    <Reference Include="PresentationFramework">
+      <HintPath>$(_WpfRefDir)\PresentationFramework.dll</HintPath>
       <Private>false</Private>
-    </ProjectReference>
+    </Reference>
+    <Reference Include="PresentationCore">
+      <HintPath>$(_WpfRefDir)\PresentationCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="WindowsBase">
+      <HintPath>$(_WpfRefDir)\WindowsBase.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Xaml">
+      <HintPath>$(_WpfRefDir)\System.Xaml.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
