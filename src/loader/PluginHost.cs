@@ -345,7 +345,7 @@ namespace PclHarmony
 
             BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic
                                  | BindingFlags.Static | BindingFlags.Instance;
-            MethodInfo target = null;
+            MethodBase target = null;
             foreach (MethodInfo m in targetType.GetMethods(flags))
             {
                 if (m.Name != spec.MethodName) continue;
@@ -353,6 +353,24 @@ namespace PclHarmony
                 target = m;
                 break;
             }
+
+            // GetMethods does not return constructors, but a plugin may need one:
+            // work a launcher does inside a constructor is not reachable otherwise.
+            if (target == null && (spec.MethodName == ".ctor" || spec.MethodName == ".cctor"))
+            {
+                ConstructorInfo ctor = null;
+                foreach (ConstructorInfo c in targetType.GetConstructors(
+                             BindingFlags.Public | BindingFlags.NonPublic
+                             | BindingFlags.Instance | BindingFlags.Static))
+                {
+                    if (c.IsStatic != (spec.MethodName == ".cctor")) continue;
+                    if (!ParametersMatch(c, spec.TargetParameterTypes)) continue;
+                    ctor = c;
+                    break;
+                }
+                if (ctor != null) target = ctor;
+            }
+
             if (target == null)
                 throw new InvalidOperationException("target method not found: " + spec.TypeName + "." + spec.MethodName);
 
@@ -373,7 +391,14 @@ namespace PclHarmony
 
             if (string.Equals(spec.HookKind, "redirect", StringComparison.OrdinalIgnoreCase))
             {
-                int redirected = RedirectCallSites(harmony, target, hook);
+                // Call-site rewriting works on IL, so the target has to be a method;
+                // a constructor cannot be redirected.
+                var redirectTarget = target as MethodInfo;
+                if (redirectTarget == null)
+                    throw new InvalidOperationException("redirect requires a method, not a constructor: "
+                                                        + spec.TypeName + "." + spec.MethodName);
+
+                int redirected = RedirectCallSites(harmony, redirectTarget, hook);
                 if (redirected == 0)
                     throw new InvalidOperationException("no call sites of " + spec.TypeName + "."
                                                         + spec.MethodName + " were found to redirect");
@@ -536,7 +561,7 @@ namespace PclHarmony
             return false;
         }
 
-        private static bool ParametersMatch(MethodInfo m, string[] typeNames)
+        private static bool ParametersMatch(MethodBase m, string[] typeNames)
         {
             if (typeNames == null) return true;   // null = no constraint; empty = zero parameters
             ParameterInfo[] ps = m.GetParameters();

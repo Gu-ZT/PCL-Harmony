@@ -65,7 +65,7 @@ namespace PclExamplePlugin
 
             string sel = null;
             try { sel = Environment.GetEnvironmentVariable("PCLHARMONY_TEST_SITES"); } catch { }
-            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5";
+            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5,6,7,8";
             Func<int, bool> on = delegate (int n)
             {
                 foreach (var s in sel.Split(','))
@@ -84,6 +84,9 @@ namespace PclExamplePlugin
                 if (on(3)) PatchSite3_RealClientListLoader();
                 if (on(4)) PatchSite4_ShowCardMinecraft();
                 if (on(5)) PatchSite5_InstallRow();
+                if (on(6)) PatchSite6_DownloadEntry();
+                if (on(7)) PatchSite7_ResourceButtons();
+                if (on(8)) PatchSite8_EmptyStateButtons();
             }
 
             Log("declared " + Specs.Count + " patch spec(s)");
@@ -854,6 +857,224 @@ namespace PclExamplePlugin
             }
             catch { return null; }
         }
+
+        // =================================================================
+        // SITE 6 - the download page's left-hand entries
+        //
+        // The shipped constructor collapses both entries and points the page at a
+        // sub-page that is not the first one. Everything below restores them after
+        // the constructor has run, so it works for the first instance and for any
+        // later one too.
+        // =================================================================
+        private static bool PatchSite6_DownloadEntry()
+        {
+            var t = T("PCL.PageDownloadLeft");
+            if (t == null) { Log("SKIP site6"); return false; }
+            return Declare("postfix", "PCL.PageDownloadLeft", ".ctor", "Site6_Postfix",
+                           new string[0]);
+        }
+
+        public static void Site6_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+
+                var install = GetProp(type, __instance, "ItemInstall");
+                var resource = GetProp(type, __instance, "LabResource");
+                var mod = GetProp(type, __instance, "ItemMod");
+                var panItem = GetProp(type, __instance, "PanItem");
+
+                SetVisible(install);
+                SetVisible(resource);
+
+                // The constructor checks a different entry than the one it starts on,
+                // so the radio state has to be moved back as well.
+                SetChecked(mod, false);
+                SetChecked(install, true);
+
+                // Put the entry back into the list. It stays a child of the same
+                // panel, so ordering relative to the others is preserved by index.
+                if (panItem != null && install != null && !ChildrenContains(panItem, install))
+                {
+                    InsertChild(panItem, install, 0);
+                    Site6Inserted++;
+                }
+
+                // Point the page at the first sub-page again. This only changes the
+                // field; creating the page here would re-enter the constructor.
+                var pageIdField = type.GetField("PageID",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (pageIdField != null)
+                    pageIdField.SetValue(__instance, EnumValue(pageIdField.FieldType, "DownloadInstall"));
+
+                Site6Visits++;
+                if (Site6Visits <= 3)
+                    Log("site6: download entries restored (visit #" + Site6Visits + ")");
+            }
+            catch (Exception ex)
+            {
+                Log("site6 error (page left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        public static int Site6Visits;
+        public static int Site6Inserted;
+
+        /// <summary>
+        /// Reveals a control unless it is already visible, and records nothing when
+        /// the control is absent.
+        /// </summary>
+        private static void SetVisible(object element)
+        {
+            try
+            {
+                if (element == null) return;
+                var p = element.GetType().GetProperty("Visibility",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (p == null || !p.CanWrite) return;
+                object visible = EnumValue(p.PropertyType, "Visible");
+                if (p.GetValue(element, null).Equals(visible)) return;
+                p.SetValue(element, visible, null);
+            }
+            catch (Exception ex)
+            {
+                Log("[Example] SetVisible failed: " + ex.Message);
+            }
+        }
+
+        private static void SetChecked(object element, bool value)
+        {
+            try
+            {
+                if (element == null) return;
+                var p = element.GetType().GetProperty("Checked",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (p == null || !p.CanWrite) return;
+                p.SetValue(element, value, null);
+            }
+            catch (Exception ex)
+            {
+                Log("[Example] SetChecked failed: " + ex.Message);
+            }
+        }
+
+        private static bool ChildrenContains(object panel, object child)
+        {
+            try
+            {
+                var children = GetChildren(panel);
+                if (children == null) return false;
+                var contains = children.GetType().GetMethod("Contains");
+                if (contains == null) return false;
+                return (bool)contains.Invoke(children, new[] { child });
+            }
+            catch (Exception ex)
+            {
+                Log("[Example] ChildrenContains failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void InsertChild(object panel, object child, int index)
+        {
+            try
+            {
+                var children = GetChildren(panel);
+                if (children == null) return;
+                var insert = children.GetType().GetMethod("Insert");
+                if (insert == null)
+                {
+                    var add = children.GetType().GetMethod("Add");
+                    if (add != null) add.Invoke(children, new[] { child });
+                    return;
+                }
+                insert.Invoke(children, new[] { (object)index, child });
+            }
+            catch (Exception ex)
+            {
+                Log("[Example] InsertChild failed: " + ex.Message);
+            }
+        }
+
+        // =================================================================
+        // SITE 7 - the resource page's install button
+        //
+        // The page type setter forces the button hidden on every change, so the
+        // postfix runs after that assignment and re-evaluates it.
+        // =================================================================
+        private static bool PatchSite7_ResourceButtons()
+        {
+            var t = T("PCL.PageResource");
+            if (t == null) { Log("SKIP site7"); return false; }
+            return Declare("postfix", "PCL.PageResource", "set_PageType", "Site7_Postfix",
+                           // One parameter (the new value); null = do not constrain it, so the
+                           // setter is selected regardless of the enum type name.
+                           (string[])null);
+        }
+
+        public static void Site7_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+
+                // Read the field rather than the property: the setter has already
+                // stored the new value by the time a postfix runs.
+                var pageType = GetProp(type, __instance, "PageType");
+                var button = GetProp(type, __instance, "BtnSearchInstallModPack");
+                if (pageType == null || button == null) return;
+
+                // Only meaningful for the modpack listing; every other type keeps the
+                // button hidden exactly as shipped.
+                if (Convert.ToInt32(pageType) != Site7ModPackType) return;
+
+                SetVisible(button);
+                Site7Visits++;
+                if (Site7Visits <= 3)
+                    Log("site7: install button restored (visit #" + Site7Visits + ")");
+            }
+            catch (Exception ex)
+            {
+                Log("site7 error (button left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        public static int Site7Invoked;
+        public static int Site7Visits;
+
+        private static int _site7ModPackType = 2;
+        private static int Site7ModPackType { get { return _site7ModPackType; } }
+
+        // =================================================================
+        // SITE 8 - the empty-state download button
+        // =================================================================
+        private static bool PatchSite8_EmptyStateButtons()
+        {
+            var t = T("PCL.PageSelectRight");
+            if (t == null) { Log("SKIP site8"); return false; }
+            return Declare("postfix", "PCL.PageSelectRight", "McInstanceListUI",
+                           "Site8_Postfix", (string[])null);
+        }
+
+        public static void Site8_Postfix(object __instance)
+        {
+            try
+            {
+                var button = GetProp(__instance.GetType(), __instance, "BtnEmptyDownload");
+                if (button == null) return;
+                SetVisible(button);
+                Site8Visits++;
+                if (Site8Visits <= 3)
+                    Log("site8: empty-state button restored (visit #" + Site8Visits + ")");
+            }
+            catch (Exception ex)
+            {
+                Log("site8 error (button left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        public static int Site8Visits;
 
         // --- reflection over WPF Children collections -----------------------
         private static object GetChildren(object element)

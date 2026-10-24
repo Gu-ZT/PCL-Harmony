@@ -237,7 +237,7 @@ namespace PclHarmony.Ce
             Type targetType = ResolveType(spec.TypeName);
             if (targetType == null) return;   // assembly not loaded yet; retried on AssemblyLoad
 
-            MethodInfo target = FindMethod(targetType, spec.MethodName, spec.TargetParameterTypes);
+            MethodBase target = FindMethod(targetType, spec.MethodName, spec.TargetParameterTypes);
             if (target == null)
             {
                 item.Failed = true;
@@ -275,7 +275,18 @@ namespace PclHarmony.Ce
             var harmony = GetHarmony();
             if (string.Equals(spec.HookKind, "redirect", StringComparison.OrdinalIgnoreCase))
             {
-                int redirected = RedirectCallSites(harmony, target, hook);
+                // Call-site rewriting works on IL, so the target has to be a method;
+                // a constructor cannot be redirected.
+                var redirectTarget = target as MethodInfo;
+                if (redirectTarget == null)
+                {
+                    item.Failed = true;
+                    Log("redirect requires a method, not a constructor: "
+                        + spec.TypeName + "." + spec.MethodName);
+                    return;
+                }
+
+                int redirected = RedirectCallSites(harmony, redirectTarget, hook);
                 if (redirected == 0)
                 {
                     item.Failed = true;
@@ -444,8 +455,22 @@ namespace PclHarmony.Ce
             return false;
         }
 
-        private static MethodInfo FindMethod(Type type, string name, string[] paramTypeNames)
+        private static MethodBase FindMethod(Type type, string name, string[] paramTypeNames)
         {
+            // GetMethods does not return constructors, but a plugin may need one:
+            // work a launcher does inside a constructor is not reachable otherwise.
+            // Kept in step with the net48 loader.
+            if (name == ".ctor" || name == ".cctor")
+            {
+                foreach (var c in type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic
+                                                       | BindingFlags.Instance | BindingFlags.Static))
+                {
+                    if (c.IsStatic != (name == ".cctor")) continue;
+                    if (ParameterTypesMatch(c.GetParameters(), paramTypeNames)) return c;
+                }
+                return null;
+            }
+
             var candidates = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
                                              | BindingFlags.Static | BindingFlags.Instance)
                                  .Where(m => m.Name == name).ToArray();
@@ -466,6 +491,18 @@ namespace PclHarmony.Ce
                 if (match) return m;
             }
             return candidates[0];
+        }
+
+        private static bool ParameterTypesMatch(ParameterInfo[] ps, string[] names)
+        {
+            if (names == null) return true;
+            if (ps.Length != names.Length) return false;
+            for (int i = 0; i < ps.Length; i++)
+            {
+                if (!string.Equals(ps[i].ParameterType.Name, names[i], StringComparison.Ordinal))
+                    return false;
+            }
+            return true;
         }
 
         private static Type ResolveType(string fullName)
