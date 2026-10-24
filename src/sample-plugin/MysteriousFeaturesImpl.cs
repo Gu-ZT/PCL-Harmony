@@ -65,7 +65,7 @@ namespace PclExamplePlugin
 
             string sel = null;
             try { sel = Environment.GetEnvironmentVariable("PCLHARMONY_TEST_SITES"); } catch { }
-            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5,6,7,8";
+            if (string.IsNullOrEmpty(sel)) sel = "1,2,3,4,5,6,7,8,9,10";
             Func<int, bool> on = delegate (int n)
             {
                 foreach (var s in sel.Split(','))
@@ -87,6 +87,8 @@ namespace PclExamplePlugin
                 if (on(6)) PatchSite6_DownloadEntry();
                 if (on(7)) PatchSite7_ResourceButtons();
                 if (on(8)) PatchSite8_EmptyStateButtons();
+                if (on(9)) PatchSite9_LaunchButtonState();
+                if (on(10)) PatchSite10_ImportEntry();
             }
 
             Log("declared " + Specs.Count + " patch spec(s)");
@@ -1043,8 +1045,107 @@ namespace PclExamplePlugin
         public static int Site7Invoked;
         public static int Site7Visits;
 
-        private static int _site7ModPackType = 2;
-        private static int Site7ModPackType { get { return _site7ModPackType; } }
+        // ResourceTypes.ModPack in the launcher's enum. The enum is not declared in the
+        // launcher assembly itself, so the value comes from the property that uses it.
+        private static int Site7ModPackType
+        {
+            get
+            {
+                try
+                {
+                    var pageType = Target == null ? null : Target.GetType("PCL.PageResource", false);
+                    var prop = pageType == null ? null : pageType.GetProperty("PageType",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    if (prop != null)
+                        return Convert.ToInt32(Enum.Parse(prop.PropertyType, "ModPack"));
+                    Log("[Example] PageResource.PageType not found, assuming ModPack = 2");
+                }
+                catch (Exception ex)
+                {
+                    Log("[Example] Site7ModPackType lookup failed: " + ex.Message);
+                }
+                return 2;
+            }
+        }
+
+        // =================================================================
+        // SITE 9 - the launch button's empty-state variant
+        //
+        // With no instance selected the button is set to a disabled state whose text
+        // differs from the one the click handler acts on. This site turns it back into
+        // the actionable variant after the state machine has run.
+        // =================================================================
+        private static bool PatchSite9_LaunchButtonState()
+        {
+            var t = T("PCL.PageLaunchLeft");
+            if (t == null) { Log("SKIP site9"); return false; }
+            return Declare("postfix", "PCL.PageLaunchLeft", "RefreshButtonsUI",
+                           "Site9_Postfix", new string[0]);
+        }
+
+        public static void Site9_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+                object button = GetProp(type, __instance, "BtnLaunch");
+                if (button == null) return;
+
+                // Only the "no instance selected" state is relevant; a real instance
+                // leaves the button on its normal launch text, which must not be touched.
+                var textProp = button.GetType().GetProperty("Text",
+                    BindingFlags.Public | BindingFlags.Instance);
+                var enabledProp = button.GetType().GetProperty("IsEnabled",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (textProp == null || enabledProp == null) return;
+
+                bool busy = "正在加载".Equals(Convert.ToString(textProp.GetValue(button, null)));
+                if (busy) return;
+
+                bool hasInstance = HasSelectedInstance();
+                if (hasInstance) return;
+
+                object actionableText = textProp.GetValue(button, null);
+                if (Site9ActionText.Equals(Convert.ToString(actionableText))) return;
+
+                textProp.SetValue(button, Site9ActionText, null);
+                enabledProp.SetValue(button, true, null);
+
+                Site9Visits++;
+                if (Site9Visits <= 3)
+                    Log("site9: launch button restored (visit #" + Site9Visits + ")");
+            }
+            catch (Exception ex)
+            {
+                Log("site9 error (button left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        public static int Site9Visits;
+
+        /// <summary>
+        /// The button text the launcher's own click handler routes to the download page.
+        /// Kept as a constant because the handler compares against the literal.
+        /// </summary>
+        private const string Site9ActionText = "下载游戏";
+
+        /// <summary>True when an instance is selected in the launcher's state.</summary>
+        private static bool HasSelectedInstance()
+        {
+            try
+            {
+                var modMinecraft = Target == null ? null : Target.GetType("PCL.ModMinecraft", false);
+                if (modMinecraft == null) return true;   // unknown shape: leave the button alone
+                var f = modMinecraft.GetField("McInstanceSelected",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                return f != null && f.GetValue(null) != null;
+            }
+            catch (Exception ex)
+            {
+                Log("[Example] HasSelectedInstance failed: " + ex.Message);
+                return true;
+            }
+        }
 
         // =================================================================
         // SITE 8 - the empty-state download button
@@ -1075,6 +1176,212 @@ namespace PclExamplePlugin
         }
 
         public static int Site8Visits;
+
+        // =================================================================
+        // SITE 10 - the folder list's import entry
+        //
+        // The list is rebuilt from scratch whenever it refreshes, and the shipped code
+        // creates the import entry but never adds it to the panel. This site appends it
+        // after the list has been built, so a refresh cannot drop it.
+        // =================================================================
+        private static bool PatchSite10_ImportEntry()
+        {
+            var t = T("PCL.PageSelectLeft");
+            if (t == null) { Log("SKIP site10"); return false; }
+            return Declare("postfix", "PCL.PageSelectLeft", "McFolderListUI",
+                           "Site10_Postfix", new string[0]);
+        }
+
+        public static void Site10_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+                object panList = GetProp(type, __instance, "PanList");
+                if (panList == null) { Log("site10: PanList unavailable"); return; }
+
+                if (FindListItem(panList, Site10EntryTitle) != null) return;   // already there
+
+                var listItemType = FindLauncherType("PCL.MyListItem");
+                if (listItemType == null) { Log("site10: MyListItem type missing"); return; }
+
+                object item = Activator.CreateInstance(listItemType);
+                SetMember(item, "IsScaleAnimationEnabled", false);
+                SetMember(item, "Type", EnumValue(
+                    listItemType.GetProperty("Type").PropertyType, "Clickable"));
+                SetMember(item, "Title", Site10EntryTitle);
+                SetMember(item, "Height", 34.0);
+                SetMember(item, "ToolTip", Site10EntryTooltip);
+                SetMember(item, "Logo", Site10EntryLogo);
+
+                var click = BuildImportDelegate(type, __instance, listItemType);
+                if (click == null) { Log("site10: could not build click handler"); return; }
+                AddClick(item, click);
+
+                // The entry belongs in the "add or import" group, directly after the
+                // existing add-folder entry and before the trailing spacer.
+                int index = IndexOfLastItem(panList);
+                if (index < 0) index = ChildrenCount(GetChildren(panList));
+                InsertChild(panList, item, index);
+
+                Site10Visits++;
+                Log("site10: import entry restored (visit #" + Site10Visits + ", index " + index + ")");
+            }
+            catch (Exception ex)
+            {
+                Log("site10 error (list left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        public static int Site10Visits;
+
+        private const string Site10EntryTitle = "导入整合包";
+        private const string Site10EntryTooltip = "在当前选择的 Minecraft 文件夹下安装整合包";
+
+        /// <summary>
+        /// The icon the shipped list used for this entry, reproduced because the compiled
+        /// list no longer carries it. Without it the row renders as bare text and does not
+        /// match its neighbours.
+        /// </summary>
+        private const string Site10EntryLogo =
+            "M512 40.96C249.344 40.96 35.84 252.416 35.84 512s213.504 471.04 476.16 471.04c103.424 0 202.752-33.2" +
+            "8 286.72-96.256l1.536-1.536c5.12-5.632 7.68-12.8 7.68-19.968 0-16.896-13.824-30.208-30.72-30.208-7.6" +
+            "8 0-15.36 2.56-20.992 7.68h-0.512c-71.68 52.224-155.648 79.36-243.712 79.36-227.328 0-412.16-182.784" +
+            "-412.16-407.552 0-224.768 184.832-407.552 412.16-407.552s412.16 182.784 412.16 407.552c0 68.608-15.8" +
+            "72 132.608-46.592 190.464-0.512 1.024-1.024 2.048-1.024 3.072-0.512 2.048-1.536 4.608-1.536 8.192 0 " +
+            "16.896 13.824 30.208 30.72 30.208 12.288 0 23.04-7.168 28.16-18.432 35.84-68.608 53.76-141.312 53.76" +
+            "-216.064 0.512-259.584-212.992-471.04-475.648-471.04z M812.032 483.328c-31.744-20.992-71.68 1.536-78" +
+            ".848 6.144-1.024 0.512-104.448 61.44-128 74.752-8.192 4.608-22.528-0.512-27.136-4.096-31.232-36.352-" +
+            "54.272-70.656-68.608-102.4-13.312-29.184 0.512-41.472 3.072-43.52 7.168-4.608 114.688-68.608 143.36-" +
+            "83.456 24.064-12.288 40.96-25.088 46.08-45.056 3.072-13.312 0-27.136-9.216-39.936-22.016-31.744-172." +
+            "544-84.992-311.296-3.584-157.184 91.648-152.064 242.688-150.528 292.352v9.216c0 18.944-12.8 37.376-1" +
+            "4.848 40.448l-20.992 21.504c-6.144 6.144-9.216 13.824-9.216 22.528 0 8.704 3.584 16.384 9.728 22.528" +
+            " 12.8 12.288 32.768 11.776 45.056-0.512l22.528-23.552 0.512-0.512c3.072-3.584 30.208-38.4 30.208-81." +
+            "92l-0.512-11.264c-1.536-44.544-5.632-162.816 119.296-235.52 88.064-51.2 173.056-32.256 208.896-19.96" +
+            "8-36.864 19.456-143.36 83.456-144.896 84.48-22.016 14.336-55.808 58.88-26.112 122.88 17.408 37.376 4" +
+            "3.52 76.8 80.896 120.32 14.336 17.408 62.976 37.376 103.424 15.36 24.576-13.312 125.44-73.216 130.04" +
+            "8-75.776 2.048-1.024 4.608-2.56 7.68-3.584 0 2.56-0.512 6.144-1.024 10.752-5.632 35.84-35.328 155.13" +
+            "6-191.488 181.76-49.664 8.704-89.6 3.584-121.856-0.512h-0.512c-37.888-4.608-73.216-9.216-101.888 14." +
+            "336-31.232 26.112-40.96 34.304-35.84 54.272 3.584 14.336 16.384 24.064 30.72 24.064 2.56 0 5.12-0.51" +
+            "2 7.68-1.024 6.656-1.536 12.8-5.632 16.896-10.752 2.048-2.048 7.68-6.656 20.992-18.432 6.656-5.632 2" +
+            "5.088-3.584 52.736 0 34.816 4.608 81.92 10.24 141.312 0.512 157.184-26.624 228.864-138.752 243.2-234" +
+            ".496 7.68-38.912 0-64.512-21.504-78.336z";
+
+        private static Type FindLauncherType(string fullName)
+        {
+            return Target == null ? null : Target.GetType(fullName, false);
+        }
+
+        private static void SetMember(object instance, string name, object value)
+        {
+            if (instance == null) return;
+            const BindingFlags f = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var p = instance.GetType().GetProperty(name, f);
+            if (p != null && p.CanWrite) { p.SetValue(instance, value, null); return; }
+            var field = instance.GetType().GetField(name, f);
+            if (field == null)
+            {
+                Log("[Example] SetMember: " + name + " not found on " + instance.GetType().Name);
+                return;
+            }
+            field.SetValue(instance, value);
+        }
+
+        /// <summary>Finds a list entry by its visible title.</summary>
+        private static object FindListItem(object panel, string title)
+        {
+            foreach (object child in EnumerateChildren(panel))
+            {
+                var titleProp = child.GetType().GetProperty("Title",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (titleProp == null) continue;
+                if (string.Equals(Convert.ToString(titleProp.GetValue(child, null)), title,
+                                  StringComparison.Ordinal))
+                    return child;
+            }
+            return null;
+        }
+
+        /// <summary>Index just past the last entry, skipping the trailing spacer.</summary>
+        private static int IndexOfLastItem(object panel)
+        {
+            int last = -1;
+            int i = 0;
+            foreach (object child in EnumerateChildren(panel))
+            {
+                if (child.GetType().GetProperty("Title",
+                        BindingFlags.Public | BindingFlags.Instance) != null)
+                    last = i;
+                i++;
+            }
+            return last < 0 ? i : last + 1;
+        }
+
+        /// <summary>Walks a WPF Children collection without depending on WPF types.</summary>
+        private static System.Collections.IEnumerable EnumerateChildren(object panel)
+        {
+            var children = GetChildren(panel);
+            var enumerable = children as System.Collections.IEnumerable;
+            if (enumerable == null) yield break;
+            foreach (object child in enumerable) yield return child;
+        }
+
+        /// <summary>
+        /// Hooks the entry up to the launcher's own import routine.
+        ///
+        /// The routine is a static method with no parameters, while the row's click
+        /// event needs a two-argument delegate, so a small adapter is compiled.
+        /// </summary>
+        private static Delegate BuildImportDelegate(Type pageType, object page, Type listItemType)
+        {
+            var evt = listItemType.GetEvent("Click", BindingFlags.Public | BindingFlags.Instance);
+            if (evt == null) { Log("site10: Click event missing on MyListItem"); return null; }
+
+            MethodInfo install = null;
+            var modModpack = FindLauncherType("PCL.ModModpack");
+            if (modModpack != null)
+                install = modModpack.GetMethod("ModpackInstall",
+                    BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);
+            if (install == null) { Log("site10: import routine not found"); return null; }
+
+            return BuildStaticActionAdapter(evt.EventHandlerType, install);
+        }
+
+        /// <summary>
+        /// Builds a delegate of <paramref name="delegateType"/> that ignores its arguments
+        /// and invokes the given parameterless static method.
+        /// </summary>
+        private static Delegate BuildStaticActionAdapter(Type delegateType, MethodInfo target)
+        {
+            try
+            {
+                var invoke = delegateType.GetMethod("Invoke");
+                if (invoke == null) { Log("site10: delegate has no Invoke"); return null; }
+                ParameterInfo[] dparams = invoke.GetParameters();
+
+                var parameters = new System.Linq.Expressions.ParameterExpression[dparams.Length];
+                for (int i = 0; i < dparams.Length; i++)
+                    parameters[i] = System.Linq.Expressions.Expression.Parameter(
+                        dparams[i].ParameterType, "a" + i);
+
+                var body = System.Linq.Expressions.Expression.Call(target);
+                var lambda = System.Linq.Expressions.Expression.Lambda(
+                    delegateType, body, parameters);
+                return lambda.Compile();
+            }
+            catch (Exception ex)
+            {
+                Log("site10: adapter build failed: " + ex.GetType().Name + ": " + ex.Message);
+                return null;
+            }
+        }
+
+        private static void AddClick(object listItem, Delegate handler)
+        {
+            var evt = listItem.GetType().GetEvent("Click", BindingFlags.Public | BindingFlags.Instance);
+            if (evt == null) { Log("site10: Click event missing"); return; }
+            evt.AddEventHandler(listItem, handler);
+        }
 
         // --- reflection over WPF Children collections -----------------------
         private static object GetChildren(object element)
