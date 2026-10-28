@@ -1068,13 +1068,6 @@ namespace PclExamplePlugin
             }
         }
 
-        // =================================================================
-        // SITE 9 - the launch button's empty-state variant
-        //
-        // With no instance selected the button is set to a disabled state whose text
-        // differs from the one the click handler acts on. This site turns it back into
-        // the actionable variant after the state machine has run.
-        // =================================================================
         private static bool PatchSite9_LaunchButtonState()
         {
             var t = T("PCL.PageLaunchLeft");
@@ -1083,69 +1076,55 @@ namespace PclExamplePlugin
                            "Site9_Postfix", new string[0]);
         }
 
+        /// <summary>恢复无可用版本时被禁用的下载入口。</summary>
         public static void Site9_Postfix(object __instance)
         {
             try
             {
                 var type = __instance.GetType();
                 object button = GetProp(type, __instance, "BtnLaunch");
-                if (button == null) return;
+                if (button == null)
+                {
+                    return;
+                }
 
-                // Only the "no instance selected" state is relevant; a real instance
-                // leaves the button on its normal launch text, which must not be touched.
                 var textProp = button.GetType().GetProperty("Text",
                     BindingFlags.Public | BindingFlags.Instance);
                 var enabledProp = button.GetType().GetProperty("IsEnabled",
                     BindingFlags.Public | BindingFlags.Instance);
-                if (textProp == null || enabledProp == null) return;
+                if (textProp == null || enabledProp == null)
+                {
+                    return;
+                }
 
-                bool busy = "正在加载".Equals(Convert.ToString(textProp.GetValue(button, null)));
-                if (busy) return;
-
-                bool hasInstance = HasSelectedInstance();
-                if (hasInstance) return;
-
-                object actionableText = textProp.GetValue(button, null);
-                if (Site9ActionText.Equals(Convert.ToString(actionableText))) return;
+                // PCL 的无版本禁用状态与正常启动状态文案相同，必须同时检查启用状态。
+                if (!"启动游戏".Equals(textProp.GetValue(button, null))
+                    || (bool)enabledProp.GetValue(button, null))
+                {
+                    return;
+                }
 
                 textProp.SetValue(button, Site9ActionText, null);
                 enabledProp.SetValue(button, true, null);
 
                 Site9Visits++;
                 if (Site9Visits <= 3)
-                    Log("site9: launch button restored (visit #" + Site9Visits + ")");
+                {
+                    Log("启动按钮：已恢复无版本时的下载入口（第 " + Site9Visits + " 次）");
+                }
             }
             catch (Exception ex)
             {
-                Log("site9 error (button left as shipped): " + ex.GetType().Name + ": " + ex.Message);
+                Log("恢复无版本时的下载入口失败：" + ex.GetType().Name + ": " + ex.Message);
             }
         }
 
         public static int Site9Visits;
 
         /// <summary>
-        /// The button text the launcher's own click handler routes to the download page.
-        /// Kept as a constant because the handler compares against the literal.
+        /// PCL 的点击处理按此文案进入下载页面。
         /// </summary>
         private const string Site9ActionText = "下载游戏";
-
-        /// <summary>True when an instance is selected in the launcher's state.</summary>
-        private static bool HasSelectedInstance()
-        {
-            try
-            {
-                var modMinecraft = Target == null ? null : Target.GetType("PCL.ModMinecraft", false);
-                if (modMinecraft == null) return true;   // unknown shape: leave the button alone
-                var f = modMinecraft.GetField("McInstanceSelected",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                return f != null && f.GetValue(null) != null;
-            }
-            catch (Exception ex)
-            {
-                Log("[Example] HasSelectedInstance failed: " + ex.Message);
-                return true;
-            }
-        }
 
         // =================================================================
         // SITE 8 - the empty-state download button
