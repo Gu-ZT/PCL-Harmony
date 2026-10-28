@@ -1,277 +1,311 @@
 # PCL Harmony
 
-**Harmony plugin loading for [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL).**
+**Harmony runtime plugin loader for [Plain Craft Launcher 2](https://github.com/Meloong-Git/PCL).**
 
 [简体中文](README.md) | English
 
-[How it works](#how-it-works) · [Installing](#installing) · [Uninstalling](#uninstalling) · [Writing a plugin](#writing-a-plugin) · [Building from source](#building-from-source) · [Known limitations](#known-limitations)
+[How It Works](#how-it-works) · [Installation](#installation) · [Uninstallation](#uninstallation) · [Writing a Plugin](#writing-a-plugin) · [Building from Source](#building-from-source) · [Caveats & Limitations](#caveats--limitations)
 
 ---
 
-## What this is
+## What Is This?
 
-PCL Harmony is a **plugin loader**: it takes control while the launcher starts up and injects [Harmony](https://github.com/pardeike/Harmony) into its AppDomain, so that third-party plugins can patch launcher methods at runtime.
+PCL Harmony is a **plugin loader** that hooks into the launcher at startup and injects [Harmony](https://github.com/pardeike/Harmony) into its AppDomain. This lets third-party plugins intercept and patch internal launcher methods on the fly—**without modifying the launcher executable on disk**.
 
-**Both launchers are supported:**
+**Supports both the Official and Community Edition (CE) builds**:
 
-| | Official PCL | PCL-CE |
+|  | Official PCL | PCL-CE |
 | --- | --- | --- |
 | Executable | `Plain Craft Launcher 2.exe` | `PCL2_CE_*.exe` |
-| Target framework | net48 (CLR 4) | net10 (CoreCLR) |
-| How control is taken | `AppDomainManager` injection | .NET startup hook |
-| Is the launcher modified? | No (only `exe.config`) | No (env var via a wrapper script) |
+| Runtime | .NET Framework 4.8 (CLR 4) | .NET 10 (CoreCLR) |
+| Injection Method | `AppDomainManager` injection | .NET Startup Hook |
+| Touches original `.exe`? | No (drops an `exe.config` file) | No (passes env vars via a wrapper script) |
 
-The two runtimes are incompatible, so `libs/` carries one payload per target and `install.ps1` picks the matching one automatically. A plugin aimed at a single launcher is written the ordinary way; to make **one plugin work on both**, see [Cross-launcher plugins](#cross-launcher-plugins).
+Because the two runtimes are mutually incompatible, `libs/` ships separate binaries for each target. `install.ps1` automatically detects which launcher you have and installs the matching files.
 
-The repository also contains two **sample plugins** (`src/sample-plugin/`, `src/example-title/`) that demonstrate how a declarative plugin plugs in: declaring patch points, branching per launcher, and attaching a WPF element to the title bar. Both target netstandard2.0, so the same DLL works on either launcher.
+If you're only targeting one edition, you can write a standard plugin. If you want **a single `.dll` that runs on both**, see [Cross-Launcher Plugins](#cross-launcher-plugins).
+
+This repo also includes two **sample plugins** (`src/sample-plugin/` and `src/example-title/`) showing how declarative plugins work: defining patch targets, branching by launcher edition, and injecting a custom WPF control into the title bar. Both target `netstandard2.0`, so the exact same binary runs on either launcher out of the box.
 
 ---
 
-## How it works
+## How It Works
 
-### 1. Gaining control before `Main`
+### 1. Hijacking Execution Before `Main`
 
-The installer writes a `Plain Craft Launcher 2.exe.config` next to the launcher, containing two key elements:
+For Official PCL, the installer generates a `Plain Craft Launcher 2.exe.config` file in the launcher directory with two key entries:
 
 ```xml
 <runtime>
   <appDomainManagerAssembly value="PclHarmony" />
   <appDomainManagerType value="PclHarmony.Entry" />
 </runtime>
+
 ```
 
-When the CLR creates the AppDomain it instantiates `PclHarmony.Entry` (an `AppDomainManager` subclass) **before PCL's own `Main()` runs**. Inside `InitializeNewDomain` the loader does as little as possible — record the directory, subscribe to `AssemblyLoad` — and performs **no file I/O**. That is a hard requirement: the CLR has not finished bringing up the domain at that point, and touching the filesystem there corrupts PCL's own startup.
+When the CLR spins up the AppDomain, it instantiates `PclHarmony.Entry` (which inherits from `AppDomainManager`) **before PCL's own `Main()` method even runs**.
 
-### 2. Patching when the target assembly loads
+During `InitializeNewDomain`, the loader does the bare minimum: it records the working directory and subscribes to the `AssemblyLoad` event, **strictly avoiding any file I/O**. That's a hard rule—the CLR hasn't finished initializing the AppDomain at this point, and touching the filesystem this early corrupts PCL's own startup sequence.
 
-When the `AssemblyLoad` event reports that the `Plain Craft Launcher 2` assembly has loaded, the loader:
+### 2. Patching When the Target Assembly Loads
 
-1. installs the embedded-dependency resolver (see the next section);
-2. scans `<directory of the exe>\plugins\*.dll` and loads each with `Assembly.LoadFrom`;
-3. finds types implementing `PclHarmony.IPlugin`, instantiates them and calls `Load(Harmony, Assembly)`, handing the target assembly to the plugin.
+Once the `AssemblyLoad` event fires for the `Plain Craft Launcher 2` assembly, the loader does three things in order:
 
-PCL's `Main()` has not started yet, so patches applied here stay in effect for the whole run.
+1. Hooks up a custom assembly resolver for embedded dependencies (see #5 below).
+2. Scans `<exe_dir>\plugins\*.dll` and loads everything via `Assembly.LoadFrom`.
+3. Finds all types implementing `PclHarmony.IPlugin`, instantiates them, and calls `Load(Harmony, Assembly)`, handing over the launcher assembly.
 
-### 3. Why `exe.config` must set `UseLegacyPathHandling=false`
+Since PCL's `Main()` still hasn't run yet, any patches applied here stay active for the entire lifecycle of the process.
 
-The installer writes this alongside the AppDomainManager identity:
+### 3. Why `UseLegacyPathHandling=false` Is Mandatory in `exe.config`
+
+The installer also writes this switch into the config file:
 
 ```xml
 <AppContextSwitchOverrides
     value="Switch.System.IO.UseLegacyPathHandling=false;Switch.System.IO.BlockLongPaths=false" />
+
 ```
 
-**This is not optional.** Once injection is active via `appDomainManagerAssembly`, leaving legacy path handling enabled makes the CLR fall back to the old path rules; the `\\?\` extended-prefix paths PCL builds then fail validation as containing illegal characters, and the launcher dies with a **"运行环境错误"** (environment error) dialog. With the switch in place PCL reaches its main window normally (title `Plain Craft Launcher　`, ending in a U+3000 ideographic space).
+**Do not remove this.** As soon as you inject code via `appDomainManagerAssembly`, the CLR assumes it's running a legacy pre-.NET 4.0 app and falls back to archaic path validation rules. PCL heavily relies on extended-length paths prefixed with `\\?\`; under legacy rules, the CLR flags those as invalid characters, causing PCL to immediately throw a **"Runtime Environment Error"** dialog and crash. Flipping this switch keeps modern path handling intact so PCL can reach its main window (fun fact: the window title is `Plain Craft Launcher ` with a trailing U+3000 full-width space).
 
-### 4. Why the TLS defaults must be repaired too
+### 4. Fixing Broken TLS Defaults
 
-Injecting an `AppDomainManager` makes the CLR treat the host as a *legacy* (pre-v4) framework application. Besides the path handling above, that has a second consequence:
+Injecting an `AppDomainManager` triggers a second legacy quirk: because the CLR treats the host as a pre-v4 app, **`ServicePointManager.SecurityProtocol` gets stuck on `Ssl3, Tls`, completely disabling TLS 1.2 and 1.3**.
 
-**`ServicePointManager.SecurityProtocol` stays at `Ssl3, Tls` and never picks up TLS 1.2+.** Every HTTPS request then fails with `SecureChannelFailure` and the launcher reports "你的网络环境不佳，请稍后再试，或使用 VPN 改善网络环境。" ("your network is poor…") — which is why the download page stays empty.
+As a result, every HTTPS request fails with `SecureChannelFailure`, the launcher complains about a "poor network environment," and the download tab stays completely blank.
 
-PCL does not repair this itself: it only sets `SecurityProtocol` when `Environment.OSVersion < 6.2` (pre-Windows 8). On modern Windows it relies entirely on the CLR default, and the default has already been skewed by the injection.
+PCL won't fix this on its own—it only sets `SecurityProtocol` manually if it detects an OS older than Windows 8 (`Environment.OSVersion < 6.2`). On Windows 10/11, it trusts the CLR defaults, which our injection inadvertently broke.
 
-**The loader therefore adds TLS 1.2 / 1.3 explicitly in `InitializeNewDomain`**, additively — it never removes protocols the host already configured. This happens before the launcher's `Main()`, i.e. before any network request. The result is logged to `PclHarmony.log`:
+To fix this, **the loader explicitly enables TLS 1.2 and 1.3 inside `InitializeNewDomain**` (appending flags without stripping existing ones) before `Main()` or any network calls occur. You'll see this confirmed in `PclHarmony.log`:
 
 ```
 TLS: SecurityProtocol Ssl3, Tls -> Ssl3, Tls, Tls12, Tls13
-```
-
-It lives in code rather than only in the config switch (`Switch.System.Net.DontEnableSchUseStrongCrypto=false`) because that switch is read exactly once very early: a hand-edited or badly merged `exe.config` would silently break networking again.
-
-### 5. Native dependency resolution: why the loader needs its own `AssemblyResolve`
-
-PCL embeds all of its dependencies (`MeloongCore`, `MeloongCore.Wpf`, `PCLCS`, `Newtonsoft.Json`, `NAudio`, `Ookii.Dialogs.Wpf`, `Imazen.WebP`, `CacheCow.*`, `ThrottleDebounce`, `System.Net.Http.Formatting`, `Microsoft.Win32.Registry` — 13 in total) as `byte[]` entries in its own manifest resource `PCL.Resources.resources`, and resolves them from an `AssemblyResolve` handler registered in `Application.New()`.
-
-The problem: **Harmony has to resolve the metadata of the methods it patches before `Application.New()` ever runs.** At that point PCL's resolver does not exist yet, so those dependencies throw `FileNotFoundException`. The loader therefore implements an equivalent resolver of its own (`EmbeddedResolver`) that serves the same resource by prefix and `Assembly.Load`s the bytes.
-
-### 6. Repository layout
 
 ```
-project.json               version manifest - the ONLY place the version lives
-                           (name / version / description)
-Directory.Build.props      feeds project.json's version into every assembly
-src/loader/                loader C# sources (net48 -> PclHarmony.dll)
-  Entry.cs                 AppDomainManager entry point, subscribes to AssemblyLoad
-  EmbeddedResolver.cs      embedded dependency resolution (PCL.Resources.resources)
-  PluginHost.cs            plugins\ scan, plugin instantiation and loading
-  LoaderLog.cs             lazily initialised, low-cost logging (PclHarmony.log)
-  IPlugin.cs               plugin interface
-  PluginApi.cs             helper API exposed to plugins
-src/contract/                 runtime-neutral plugin contract (netstandard2.0)
-  Contract.cs                 IDeclarativePlugin / PatchSpec / IPluginHost
-src/sample-plugin/            sample plugin (netstandard2.0 -> Example.dll)
-src/example-title/            sample plugin: title-bar badge (netstandard2.0)
 
-src/ce-host/                  PCL-CE loader (net8 -> PclHarmony.CeHost.dll)
-  StartupHook.cs              startup-hook entry point
-  Host.cs                     plugin scan + patch application
-libs/official/                official PCL payload (net48)
-libs/ce/                      PCL-CE payload (net10)
-install.ps1                one-shot installer (defaults to the current directory)
-uninstall.ps1              one-shot uninstaller
-build.ps1                  builds all projects and refreshes dist\ + libs\
-dist/                      build output (produced by build.ps1, not version controlled)
+We enforce this in code rather than relying solely on the `Switch.System.Net.DontEnableSchUseStrongCrypto=false` config flag because that switch is only read once during early startup—if a user's config file gets mangled or merged improperly, it fails silently. Doing it in code is bulletproof.
+
+### 5. Resolving Embedded Dependencies Early
+
+PCL packs all 13 of its third-party dependencies (`MeloongCore`, `Newtonsoft.Json`, `NAudio`, etc.) as raw `byte[]` blobs inside its manifest resource `PCL.Resources.resources`. Normally, PCL registers its own `AssemblyResolve` handler inside `Application.New()` to unpack them on demand.
+
+Here's the catch: **Harmony needs to inspect the metadata of target methods *before* `Application.New()` runs**. Because PCL's resolver isn't hooked up yet, Harmony hits a `FileNotFoundException` the moment a patched method references one of those libraries.
+
+To get around this, our loader registers its own resolver (`EmbeddedResolver`) ahead of time, pulling the exact same `byte[]` blobs out of `PCL.Resources.resources` and calling `Assembly.Load` before Harmony starts patching.
+
+### 6. Project Layout
+
+```
+project.json               Single source of truth for metadata (name / version / description)
+Directory.Build.props      Reads version from project.json and stamps it into all assemblies
+
+src/contract/              Cross-runtime plugin contract (netstandard2.0)
+  Contract.cs              Defines IDeclarativePlugin and PatchSpec
+
+src/loader/                Official PCL loader (net48, builds PclHarmony.dll)
+  Entry.cs                 AppDomainManager entry point; listens to AssemblyLoad
+  EmbeddedResolver.cs      Unpacks PCL's embedded dependencies from PCL.Resources.resources
+  PluginHost.cs            Scans plugins\, instantiates and loads plugins
+  LoaderLog.cs             Lazy-initialized, low-overhead logger (writes PclHarmony.log)
+  IPlugin.cs               Native plugin interface for Official PCL
+  PluginApi.cs             Helper APIs exposed to plugins
+
+src/ce-host/               PCL-CE loader (net8, builds PclHarmony.CeHost.dll)
+  StartupHook.cs           .NET Startup Hook entry point (global StartupHook class)
+  Host.cs                  Scans plugins\ and applies PatchSpec definitions
+
+src/sample-plugin/         Sample plugin (netstandard2.0, builds Example.dll)
+src/example-title/         Sample plugin: custom title bar badge (netstandard2.0, builds Example-Title.dll)
+
+install.ps1                One-click installer (auto-detects edition; defaults to current dir)
+uninstall.ps1              One-click uninstaller
+build.ps1                  Builds everything and populates dist\ and libs\
+libs/official/             Binaries for Official PCL (net48)
+libs/ce/                   Binaries for PCL-CE (net10)
+dist/                      Build output (generated by build.ps1, gitignored)
+
 ```
 
-**Change the version only in `project.json`.** `Directory.Build.props` reads its `version` field and stamps every assembly with it, so binaries, release tags and the manifest cannot drift apart; CI additionally verifies the version that was actually stamped after building and fails on any mismatch.
+**Version numbers are managed exclusively in `project.json**`. `Directory.Build.props` pulls the `version` field at build time and stamps it into every assembly, keeping binaries, Git tags, and manifests in sync. CI also reads back the compiled assembly versions post-build and fails the pipeline if anything mismatches.
 
-How the version flows through CI:
+How versioning works in CI:
 
-| Event | Published tag | Version inside the artifact |
+| Trigger | Release Tag | Version Stamped in Binaries |
 | --- | --- | --- |
-| Push to `main` | pre-release `v1.0.0-dev.<run>` | `1.0.0-dev.<run>` (**not** `1.0.0`) |
-| Push a `v1.0.0` tag | stable `v1.0.0` | `1.0.0` |
+| Push to `main` | Pre-release `v1.0.0-dev.<run>` | `1.0.0-dev.<run>` (**not** `1.0.0`) |
+| Push `v1.0.0` tag | Stable `v1.0.0` | `1.0.0` |
 
-`AssemblyVersion` / `FileVersion` are four-part numeric versions and cannot carry a `-dev.<run>` suffix, so they use the numeric core (`1.0.0`); the full string lives in `InformationalVersion` (for example `1.0.0-dev.15+<commit>`). To tell which version an artifact really is, read `InformationalVersion`, not `AssemblyVersion`.
+Because Windows `AssemblyVersion` and `FileVersion` only accept four-part numbers, they get the numeric core (`1.0.0`), while the full string with `-dev.<run>+<commit>` goes into `InformationalVersion`. Always check `InformationalVersion` if you need to know the exact build of a binary.
 
-Stable releases (a `v*` tag) attach two extra files next to `PCL-Harmony.zip`:
+When cutting a stable release (pushing a `v*` tag), CI attaches two extra files alongside `PCL-Harmony.zip`:
 
-- `project.json` - the manifest used for that build;
-- `SHA256SUMS.txt` - the archive's SHA-256 checksum.
+* `project.json` — the exact manifest used for that build.
+* `SHA256SUMS.txt` — SHA-256 checksums for the zip archive.
 
-After a stable release succeeds, CI advances `project.json` to the next patch (`1.0.0` → `1.0.1`) and commits it back to `main`, so the next ordinary push does not rebuild an already-shipped version. Pre-release tags never bump. That step is idempotent: it only bumps while `project.json` still equals the version just released, so re-running the job or bumping by hand can never double-advance.
+After a stable release succeeds, CI automatically bumps `project.json` to the next patch version (`1.0.0` → `1.0.1`) and commits it back to `main` so subsequent commits don't collide with an already-released version. Pre-releases don't trigger a bump. This step is idempotent: it only increments if `project.json` still matches the tag that was just published, so re-running a CI job or bumping manually won't double-increment.
 
-This repository does not contain PCL itself or its source.
+*Note: This repository does not contain or distribute the PCL executable or its source code.*
 
 ---
 
-## Installing
+## Installation
 
 ### Prerequisites
 
-- Windows
-- [.NET Framework 4.8](https://dotnet.microsoft.com/download/dotnet-framework/net48) (PCL itself runs on it)
-- An installation of **PCL 2.99.0.0**
+* Windows
+* **For Official PCL**: An installation of **PCL 2.99.0.0** + [.NET Framework 4.8](https://dotnet.microsoft.com/download/dotnet-framework/net48) (already installed if PCL runs on your machine).
+* **For PCL-CE**: An installation of PCL-CE + the [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (required by CE itself).
 
-### From a release (recommended)
+### Using Releases (Recommended)
 
-1. Download `PCL-Harmony.zip` from Releases and unzip it. You get:
-
-   ```
-   install.ps1   uninstall.ps1   README.md
-   PclHarmony.dll   0Harmony.dll
-   plugins\Example.dll   plugins\Example-Title.dll
-   ```
-
-2. Close any running PCL.
-3. Unzip the archive **into the PCL folder** (next to `Plain Craft Launcher 2.exe`) and run PowerShell there:
-
-   ```powershell
-   .\install.ps1
-   ```
-
-   `-TargetDir` is optional and defaults to the current directory. To install somewhere else, pass it explicitly:
-
-   ```powershell
-   .\install.ps1 -TargetDir "D:\path\to\PCL"
-   ```
-
-`install.ps1` **detects the target automatically**: `Plain Craft Launcher 2.exe` means the official launcher, `PCL2_CE_*.exe` means PCL-CE. The matching payload is taken from `libs\`.
-
-#### Official PCL
-
-`install.ps1` performs three steps and is safe to re-run:
-
-| Step | Action |
-| --- | --- |
-| 1 | Copies `PclHarmony.dll` and `0Harmony.dll` next to the launcher executable |
-| 2 | Creates an **empty** `plugins\` folder (skipped when it already exists) |
-| 3 | Writes / merges the three config parts described above into `Plain Craft Launcher 2.exe.config` |
-
-#### PCL-CE
-
-CE's executable is a .NET apphost and **cannot take an `AppDomainManager`**, so the .NET startup hook mechanism is used instead:
-
-| Step | Action |
-| --- | --- |
-| 1 | Copies `PclHarmony.CeHost.dll`, `PclHarmony.Contract.dll`, `0Harmony.dll` |
-| 2 | Generates `Run-with-PCL-Harmony.cmd` (sets `DOTNET_STARTUP_HOOKS`, then starts CE) |
-| 3 | Creates an **empty** `plugins\` folder |
-
-**On CE you must start via `Run-with-PCL-Harmony.cmd`; double-clicking the exe will not load plugins.** The startup hook can only arrive through an environment variable, and the CE single-file bundle ignores an external `runtimeconfig.json`. The launcher binary itself is never modified.
-
-> CE is single-instance. If a CE instance is already running, a new one exits immediately and cleanly (exit code 0). That is CE's own behaviour, not a failed install.
-
-Both launchers write `PclHarmony.log` into their own folder so you can confirm the loader attached.
-
-**`install.ps1` only creates `plugins\`, it never puts a plugin in it.** The archive's own `plugins\` is just where the sample plugins come from - the script does not copy it across. To use a plugin, copy its DLL into the folder yourself.
-
-### Placing plugins
-
-A plugin is an ordinary `.dll`. **Drop it into the `plugins\` folder next to the launcher**:
+1. Grab `PCL-Harmony.zip` from Releases and extract it. You'll get:
+```
+install.ps1   uninstall.ps1   README.md
+libs\official\   PclHarmony.dll   PclHarmony.Contract.dll   0Harmony.dll
+libs\ce\         PclHarmony.CeHost.dll   PclHarmony.Contract.dll   0Harmony.dll
+plugins\Example.dll   plugins\Example-Title.dll
 
 ```
-D:\path\to\PCL\
+
+
+2. Make sure the launcher is closed.
+3. Extract the files right into your **launcher directory** (next to the `.exe`), open PowerShell there, and run:
+```powershell
+.\install.ps1
+
+```
+
+
+Or run it from anywhere by pointing `-TargetDir` to your launcher folder:
+```powershell
+.\install.ps1 -TargetDir "D:\Path\To\Your\PCL"
+
+```
+
+
+
+`install.ps1` **auto-detects your launcher edition**: if it sees `Plain Craft Launcher 2.exe`, it sets up the Official version; if it sees `PCL2_CE_*.exe`, it sets up the CE version, pulling the right files from `libs\`.
+
+#### What Happens on Official PCL
+
+| Step | Action |
+| --- | --- |
+| 1 | Copies `PclHarmony.dll`, `PclHarmony.Contract.dll`, and `0Harmony.dll` next to the `.exe` |
+| 2 | Creates an **empty** `plugins\` folder (if one doesn't already exist) |
+| 3 | Creates or merges the required runtime settings into `Plain Craft Launcher 2.exe.config` |
+
+Once done, just launch PCL normally.
+
+#### What Happens on PCL-CE
+
+Because CE's executable is a native .NET apphost, **`AppDomainManager` injection doesn't work**. Instead, we use .NET's built-in Startup Hook mechanism:
+
+| Step | Action |
+| --- | --- |
+| 1 | Copies `PclHarmony.CeHost.dll`, `PclHarmony.Contract.dll`, and `0Harmony.dll` |
+| 2 | Generates `Run-with-PCL-Harmony.cmd` (which sets `DOTNET_STARTUP_HOOKS` and launches CE) |
+| 3 | Creates an **empty** `plugins\` folder |
+
+**Important: For PCL-CE, you must launch the app via `Run-with-PCL-Harmony.cmd`. Double-clicking the `.exe` directly will bypass the plugin loader.**
+Because CE is packaged as a single-file bundle with its config baked in, it ignores external `runtimeconfig.json` files. Passing the startup hook via an environment variable in a wrapper script is the only way in without modifying the binary on disk.
+
+> Note: CE enforces a single-instance check. If CE is already running in the background, launching a new instance will immediately exit with code 0. That's normal CE behavior, not a loader crash.
+
+Both editions write a `PclHarmony.log` file in the launcher directory—check it to verify the loader is up and running.
+
+**Note: `install.ps1` only creates an empty `plugins\` directory; it does not copy the sample plugins over.** The `plugins\` folder in the zip is just there if you want to test them out. To enable a plugin, manually drop its `.dll` into your launcher's `plugins\` folder.
+
+### Installing Plugins
+
+Plugins are just standard `.dll` files. **Drop them straight into the `plugins\` folder** inside your launcher directory:
+
+```
+D:\Path\To\Your\PCL\
   Plain Craft Launcher 2.exe
   Plain Craft Launcher 2.exe.config
   PclHarmony.dll
   0Harmony.dll
   PclHarmony.log
   plugins\
-    Example.dll            <- sample plugin
-  Example-Title.dll      <- sample plugin: title-bar badge
-    YourPlugin.dll      <- your own plugin
+    Example.dll            <- Sample plugin
+    Example-Title.dll      <- Sample plugin: title bar badge
+    YourPlugin.dll         <- Your own plugin
+
 ```
 
-Notes:
+A few ground rules:
 
-- Only the **first level** of `plugins\` is scanned; subdirectories are ignored.
-- DLLs are loaded in filename order and isolated from one another.
-- A plugin should **reference but never ship** its own `0Harmony.dll` or `PclHarmony.dll`. A second copy produces a second assembly identity, which breaks the `IPlugin` cast and makes Harmony patches target the wrong type.
-- Dependencies a plugin needs but does not ship are looked up by filename in the PCL folder and then in `plugins\`.
+* Only the **top level** of `plugins\` is scanned; subdirectories are ignored.
+* Plugins load in alphabetical order by filename and are isolated from one another.
+* **Plugins must reference—not bundle—`0Harmony.dll` and `PclHarmony.dll`.** If a plugin ships its own copy of either DLL in `plugins\`, the CLR will load a duplicate assembly identity into memory, breaking `IPlugin` type casting and causing Harmony patches to miss their targets.
+* If your plugin relies on extra third-party DLLs, drop them in either the PCL root folder or `plugins\`; the loader searches both locations by filename.
 
 ### Troubleshooting
 
-| Symptom | Explanation |
+| Symptom | Cause & Fix |
 | --- | --- |
-| "运行环境错误" dialog at startup | `AppContextSwitchOverrides` is missing from the config, or was overwritten. Re-run `install.ps1`. |
-| PCL starts fine but there is no `PclHarmony.log` | The loader was not loaded. Check `appDomainManagerAssembly` / `appDomainManagerType` in the config, and that both DLLs sit beside the exe. |
-| Log exists but plugins do nothing | Look for `plugin: ... FAILED` or `skipping` lines. Usually the plugin does not implement `IPlugin`, lacks a parameterless constructor, or is missing a dependency. |
-| Temporarily disable the loader | Set the environment variable `PCLHARMONY_DISABLE=1` before starting PCL. |
+| "Runtime Environment Error" popup on launch | `AppContextSwitchOverrides` is missing from `.exe.config` or got overwritten. Re-run `install.ps1`. |
+| PCL launches fine, but `PclHarmony.log` isn't created | The loader isn't running. On Official, check `.exe.config` and make sure the core DLLs sit next to the `.exe`. On CE, make sure you're launching via `Run-with-PCL-Harmony.cmd`. |
+| Log file exists, but my plugin does nothing | Check `PclHarmony.log` for `FAILED` or `skipping`. Usually means the plugin doesn't implement the interface, lacks a parameterless public constructor, or is missing a dependency. |
+| Want to temporarily disable the loader | Set the environment variable `PCLHARMONY_DISABLE=1` before launching PCL. |
 
-A healthy plugin load looks roughly like this:
+A healthy run in `PclHarmony.log` looks like this:
 
 ```
 PclHarmony loader 1.0.0.0 attached (ADM PclHarmony.Entry)
 target assembly loaded: Plain Craft Launcher 2, Version=2.99.0.0, ...
 embedded assembly resolver installed (resource "PCL.Resources.resources", 13 prefixes)
-plugin: loading '<name>' (...) from <file>.dll
-plugin: loaded '<name>' OK, harmony="<name>", patch count=N
+plugin: loading '<Name>' (...) from <File>.dll
+plugin: loaded '<Name>' OK, harmony="<Name>", patch count=N
 plugins: N plugin(s) loaded from M dll(s)
+
 ```
 
 ---
 
-## Uninstalling
+## Uninstallation
 
-Close PCL, then:
-
-```powershell
-.\uninstall.ps1 -TargetDir "D:\path\to\PCL"
-```
-
-It will:
-
-1. delete `PclHarmony.dll` and `0Harmony.dll`;
-2. remove `appDomainManagerAssembly` / `appDomainManagerType` from the config;
-3. remove the two `AppContextSwitchOverrides` switches the installer added (dropping the empty `<AppContextSwitchOverrides>` and empty `<runtime>` too, if that leaves them empty).
-
-Everything else in the config is preserved. The `plugins\` folder and `PclHarmony.log` are **kept by default** (that is where your plugins live). To remove them as well:
+Close PCL and run:
 
 ```powershell
-.\uninstall.ps1 -TargetDir "D:\path\to\PCL" -RemovePlugins -RemoveLog
+.\uninstall.ps1 -TargetDir "D:\Path\To\Your\PCL"
+
 ```
 
-After uninstalling, PCL starts normally, exactly as if the loader had never been installed.
+The script will:
+
+1. Delete `PclHarmony*.dll`, `0Harmony.dll`, and the CE wrapper script.
+2. Strip `appDomainManagerAssembly` and `appDomainManagerType` out of `.exe.config`.
+3. Remove the two path-handling switches from `AppContextSwitchOverrides` (and clean up the `<AppContextSwitchOverrides>` / `<runtime>` tags if they're left empty).
+
+Any other custom settings in your config file are left untouched. By default, **`plugins\` and `PclHarmony.log` are kept** so you don't lose your plugins. To wipe those out too, pass the extra flags:
+
+```powershell
+.\uninstall.ps1 -TargetDir "D:\Path\To\Your\PCL" -RemovePlugins -RemoveLog
+
+```
+
+Once uninstalled, PCL runs completely stock again.
 
 ---
 
-## Writing a plugin
+## Writing a Plugin
 
-### The plugin interface
+There are two ways to write a plugin depending on which launcher(s) you want to target:
 
-A plugin is a net48 class library with at least one type that implements `PclHarmony.IPlugin` and has a **public parameterless constructor**:
+|  | Native Plugin (`IPlugin`) | Cross-Launcher Plugin (`IDeclarativePlugin`) |
+| --- | --- | --- |
+| Target Framework | `net48` | **`netstandard2.0`** |
+| Runs On | Official PCL only | Both Official PCL **and** PCL-CE |
+| Direct Harmony API Access? | Yes | **No** (declarative patch specs only) |
+| When to Use | Targeting Official PCL only (simplest) | Shipping a single `.dll` for both editions |
+
+We'll cover Native Plugins first. For universal plugins, skip down to [Cross-Launcher Plugins](#cross-launcher-plugins).
+
+### The Native Plugin Interface
+
+Create a `net48` class library containing at least one class that implements `PclHarmony.IPlugin` with a **public parameterless constructor**:
 
 ```csharp
 using System.Reflection;
@@ -281,32 +315,33 @@ namespace PclHarmony
 {
     public interface IPlugin
     {
-        /// <summary>Plugin name; also used as the Harmony instance id.</summary>
+        /// <summary>Plugin name, also used as the Harmony instance ID.</summary>
         string Name { get; }
 
         /// <summary>
-        /// Called once, after the target assembly loaded and before PCL's Main()
-        /// runs. Patches applied here are in effect for the whole run.
+        /// Called once after the launcher assembly loads, right before PCL's Main() runs.
+        /// Patches applied here stay active for the entire session.
         /// </summary>
         void Load(Harmony harmony, Assembly target);
     }
 }
+
 ```
 
-The `harmony` passed to `Load` is an instance already named after the plugin's `Name`, so patches remain attributable per plugin. `target` is the `Plain Craft Launcher 2` assembly; PCL types must be obtained by reflecting over it.
+The `harmony` instance passed into `Load` is pre-initialized with your plugin's `Name` so patches can be tracked per plugin. `target` is the loaded `Plain Craft Launcher 2` assembly—use reflection against it to locate internal PCL types and methods.
 
-### Helper API
+### Helper API (`PluginApi`)
 
-`PclHarmony.PluginApi` exposes a few conveniences:
+`PclHarmony.PluginApi` exposes a few handy utilities:
 
-| Member | Purpose |
+| Member | Description |
 | --- | --- |
-| `Assembly Target` | the target assembly (may be `null` very early) |
-| `Harmony SharedHarmony` | loader-wide shared Harmony instance, id `pcl.harmony.pluginloader` |
-| `Harmony GetHarmony(string id)` | returns (and caches) a Harmony instance per id; empty `id` yields the shared one |
-| `void Log(string message)` | appends a line to `PclHarmony.log` in the PCL folder |
+| `Assembly Target` | The launcher assembly (may be `null` if accessed too early) |
+| `Harmony SharedHarmony` | Global shared Harmony instance (`pcl.harmony.pluginloader`) |
+| `Harmony GetHarmony(string id)` | Gets (and caches) a Harmony instance by ID; returns the shared instance if `id` is null/empty |
+| `void Log(string message)` | Appends a line to `PclHarmony.log` in the launcher directory |
 
-### Minimal example
+### Minimal Example
 
 ```csharp
 using System;
@@ -324,13 +359,13 @@ namespace MyPlugin
         {
             PluginApi.Log("[MyPlugin] attaching to " + target.GetName().Version);
 
-            // Locate the target method by reflection (PCL types live in `target`)
+            // Locate the target method via reflection
             var type = target.GetType("PCL.ModBase", false);
             var method = type == null ? null : type.GetMethod("SomeMethod",
                 BindingFlags.Public | BindingFlags.Static);
             if (method == null)
             {
-                PluginApi.Log("[MyPlugin] target method not found, skipping");
+                PluginApi.Log("[MyPlugin] Target method not found, skipping");
                 return;
             }
 
@@ -340,38 +375,54 @@ namespace MyPlugin
                 postfix: null);
         }
 
-        private static void Before() { /* ... */ }
+        private static void Before() { /* Runs before target method */ }
     }
 }
+
 ```
 
-### Guidelines
+### Best Practices
 
-- **Target net48**: a plugin must use the same framework as PCL.
-- **`0Harmony` and `PclHarmony` must be `Private=false`** (or `ExcludeAssets="runtime"`); see "Placing plugins" above.
-- **Prefer reflection over referencing PCL types directly.** PCL is not a library meant for wide referencing; a compile-time dependency pins your plugin to one exact build.
-- **Failures must stay isolated.** The loader catches each plugin's exception and reverts its half-applied patches, but a plugin should still defend itself inside `Load`.
-- **Log through `PluginApi.Log`** so users can paste the output back to you.
-- See the sample plugin under `src/sample-plugin/` for a complete implementation.
+* **Target `net48**`: Must match Official PCL's runtime.
+* **Set `Private=false` (or `ExcludeAssets="runtime"`) on `0Harmony` and `PclHarmony` references**: Never copy them to your output folder (see [Installing Plugins](#installing-plugins)).
+* **Use reflection instead of referencing `Plain Craft Launcher 2.exe` directly**: PCL isn't a stable public API. Hard-referencing the binary tightly couples your plugin to a specific build, whereas reflection lets you fail gracefully if a method signature changes.
+* **Handle errors gracefully**: While the loader wraps each plugin in a `try-catch` and rolls back partial patches on crash, you should still guard your own `Load` logic.
+* **Use `PluginApi.Log**`: Makes debugging infinitely easier when users send you their `PclHarmony.log`.
+* Check out `src/sample-plugin/` for a working reference setup.
 
 ---
 
-## Cross-launcher plugins
+## Cross-Launcher Plugins
 
-To make **one DLL run on both the official launcher and PCL-CE**, two hard constraints have to be worked around.
+Getting **a single `.dll` to run on both Official PCL and PCL-CE** requires working around two runtime constraints.
 
-**Constraint 1 - the only common target is netstandard2.0.** The official launcher runs on CLR 4 (net48); PCL-CE runs on CoreCLR (net10). netstandard2.0 is the single framework both can load.
+### Constraint 1: `netstandard2.0` Is the Only Common Ground
 
-**Constraint 2 - a netstandard2.0 plugin cannot call Harmony itself.** Lib.Harmony 2.4.2 ships no netstandard2.0 build, and reflectively driving the net48 build from a netstandard2.0 caller fails:
+| Target Framework | Official PCL (CLR 4) | PCL-CE (CoreCLR) |
+| --- | --- | --- |
+| `net48` | Yes | No |
+| `net10.0` | No | Yes |
+| **`netstandard2.0`** | **Yes** | **Yes** |
+
+Your cross-launcher plugin must target **`netstandard2.0`**.
+
+### Constraint 2: `netstandard2.0` Plugins Cannot Call Harmony Directly
+
+Lib.Harmony 2.4.2 **does not ship a `netstandard2.0` build** (only `net35`, `net452`, `net472`, `net48`, `net5.0`–`net10.0`, and `netcoreapp3.x`).
+
+Worse, even if you load the `net48` Harmony binary via reflection, driving it from a `netstandard2.0` assembly crashes at runtime with a generic constraint violation:
 
 ```
-TypeLoadException: "MonoMod.Utils.Cil.ILGeneratorProxy[TTarget]" violates the
-constraint of type parameter "TTarget" (GenericArguments[0] = CecilILGenerator)
+TypeLoadException: GenericArguments[0] ("MonoMod.Utils.Cil.CecilILGenerator") on
+"MonoMod.Utils.Cil.ILGeneratorProxy[TTarget]" violates the constraint of type parameter "TTarget"
+
 ```
 
-The identical patch logic called from a native net48 assembly works fine - the difference is the caller's runtime, not the usage.
+The exact same patch call works fine when invoked from a **native `net48` assembly**—it's a quirk of how the runtime resolves types across the `netstandard` facade boundary.
 
-**The workaround: the plugin declares, the host applies.** A cross-launcher plugin implements `PclHarmony.Contract.IDeclarativePlugin` and only *describes* the patches it wants; each host applies them with the Harmony build matching its own runtime (net48 on the official side, net10 on the CE side).
+### The Workaround: Declarative Patching
+
+Instead of calling Harmony yourself, implement `PclHarmony.Contract.IDeclarativePlugin` and **declare *what* you want patched**. The host loader on each side (running natively on `net48` or `net8`/`net10`) reads your specs and invokes its own native Harmony build on your behalf.
 
 ```csharp
 using System.Collections.Generic;
@@ -383,22 +434,39 @@ public sealed class MySharedPlugin : IDeclarativePlugin
 
     public IEnumerable<PatchSpec> GetPatches(string hostKind, string hostVersion)
     {
-        // hostKind is "official" or "ce" - branch as needed
-        yield return new PatchSpec
+        // hostKind is either "official" or "ce" — branch as needed
+        if (hostKind == "ce")
         {
-            TypeName       = hostKind == "ce" ? "PCL.Program" : "PCL.Application",
-            MethodName     = "Main",
-            HookKind       = "postfix",              // "prefix" or "postfix"
-            HookTypeName   = typeof(MySharedPlugin).FullName,
-            HookMethodName = "AfterMain",            // must be a real static method
-        };
+            yield return new PatchSpec
+            {
+                TypeName       = "PCL.Program",                  // Target class
+                MethodName     = "Main",                         // Target method
+                HookKind       = "postfix",                      // "prefix" or "postfix"
+                HookTypeName   = typeof(MySharedPlugin).FullName,
+                HookMethodName = "CeAfterMain",                  // Must be a real static method
+            };
+        }
+        else
+        {
+            yield return new PatchSpec
+            {
+                TypeName       = "PCL.Application",
+                MethodName     = "Main",
+                HookKind       = "postfix",
+                HookTypeName   = typeof(MySharedPlugin).FullName,
+                HookMethodName = "OfficialAfterMain",
+            };
+        }
     }
 
-    public static void AfterMain() { /* ... */ }
+    // Hooks MUST be named public static methods
+    public static void CeAfterMain()       { /* ... */ }
+    public static void OfficialAfterMain() { /* ... */ }
 }
+
 ```
 
-Reference the contract only - **never Harmony**:
+Your `.csproj` only needs to reference the contract—**do not reference Harmony**:
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -410,58 +478,68 @@ Reference the contract only - **never Harmony**:
     <ProjectReference Include="..\contract\PclHarmony.Contract.csproj" Private="false" />
   </ItemGroup>
 </Project>
+
 ```
 
-Complete working examples are in `src/sample-plugin/` and `src/example-title/`.
+See `src/sample-plugin/` and `src/example-title/` for complete, working examples.
 
-### Guidelines
+### Gotchas for Cross-Launcher Plugins
 
-- **Hooks must be named `public static` methods**, never lambdas. A compiler-generated closure (`<GetPatches>b__2_0`) makes Harmony fail even though an identical named method works.
-- **The two sides patch different methods**: the official launcher is VB (`PCL.Application.Main`), PCL-CE is C# (`PCL.Program.Main`).
-- **CE loads assemblies late**: the startup hook runs before `Main`, so `PCL.Core` and friends do not exist yet. The CE host subscribes to `AssemblyLoad` and applies patches once the target type appears.
-- **Patch logic is largely not shareable.** Only the framework and dispatch are common; the concrete patches are two separate sets.
-- **Use `hostVersion` to tell them apart**: both assemblies are named `Plain Craft Launcher 2`, so only the version distinguishes them (2.99.x vs 2.15.x).
+* **Hooks must be named `public static` methods—no lambdas.** Compiler-generated closure methods (like `<GetPatches>b__2_0`) will be rejected by Harmony, even if the method body is identical.
+* **Target names almost always differ between editions**: Official PCL is written in VB.NET (`PCL.Application.Main`), whereas PCL-CE is largely C# (`PCL.Program.Main`). You'll need to specify separate targets per `hostKind`.
+* **Delayed assembly loading on CE is handled automatically**: Because CE's startup hook runs before `Main`, assemblies like `PCL.Core` aren't in memory yet. The CE host listens to `AssemblyLoad` and automatically applies your `PatchSpec` the moment the target assembly shows up.
+* **You're mostly sharing packaging, not patch logic**: Since internal types and methods differ wildly between Official and CE, you'll still write separate hook implementations for each—this architecture just lets you ship them in a single `.dll`.
+* **Use `hostVersion` for version checks**: Official PCL is on `2.99.x` while PCL-CE is on `2.15.x`. Both compile to the same assembly name (`Plain Craft Launcher 2`), so checking `hostVersion` is the cleanest way to tell versions apart.
 
 ---
 
-## Building from source
+## Building from Source
 
-Only the .NET SDK is required (the net48 reference assemblies are restored from NuGet, so Visual Studio is not needed):
+Requires the **.NET 8 SDK** (reference assemblies for `net48` are pulled automatically via NuGet—no Visual Studio install needed).
 
 ```powershell
-git clone <this repository>
+git clone <repo-url>
 cd PCL-Harmony
 .\build.ps1
+
 ```
 
-`build.ps1` will:
+`build.ps1` compiles all projects and populates two output directories:
 
-1. `dotnet build src\loader\PclHarmony.csproj -c Release`
-2. `dotnet build src\sample-plugin\Example.csproj -c Release`
-3. refresh `dist\PclHarmony\PclHarmony.dll`, `dist\PclHarmony\0Harmony.dll` and `dist\plugins\Example.dll`, `dist\plugins\Example-Title.dll`
-4. verify the assembly name and version of all three artifacts
+| Directory | Contents |
+| --- | --- |
+| `dist\` | Release bundle (`PclHarmony.dll`, `0Harmony.dll`, `plugins\Example*.dll`) |
+| `libs\official\` | Official PCL payload (`net48`) |
+| `libs\ce\` | PCL-CE payload (`net8` host + `net10` Harmony) |
 
-You can then install from `dist\` with `install.ps1 -TargetDir <PCL folder>`.
+Finally, it verifies assembly names and version numbers across all built artifacts. Once built, run `.\install.ps1 -TargetDir <launcher_dir>` to test locally.
 
-Pushing to `main` builds and publishes a **pre-release** (`v<version>-dev.<run_number>`); pushing a `v*` tag publishes a **stable release** and additionally attaches `project.json` and `SHA256SUMS.txt`. See `.github/workflows/ci.yml`.
-
----
-
-## Known limitations
-
-These are **real** constraints; understand them before relying on this project:
-
-1. **Tied to the exact method signatures and IL of specific launcher versions.** The official side targets PCL 2.99.0.0, the CE side 2.15.1.0. After either upgrade, the matching plugins will likely need rework.
-2. **The sample plugins are reference implementations, not product features.** They show how a plugin plugs in; use them as needed.
-3. **Plugins run with full trust.** A plugin executes inside the launcher's AppDomain with the launcher's own privileges — the equivalent of arbitrary code execution. **Only install DLLs you trust.**
-4. **This is a runtime patch, not an official extension mechanism.** The official side injects an `AppDomainManager` and edits `exe.config`; the CE side uses a `DOTNET_STARTUP_HOOKS` startup hook. Neither launcher provides a plugin interface.
-5. **On PCL-CE you must start through the generated wrapper script.** Double-clicking the exe will not load plugins: the startup hook can only arrive via an environment variable, and the CE bundle ignores an external runtimeconfig.json. The launcher binary is never modified.
-6. **A cross-launcher plugin's patch code is effectively two sets.** The internal types and methods differ completely; only the contract and dispatch are shared.
+> **Why does the CE host target `net8` instead of `net10`?**
+> Even though PCL-CE runs on the .NET 10 runtime, a `net8` assembly loads into a .NET 10 process without issue. Targeting `net8` lets contributors build the entire repo using the widely installed .NET 8 SDK instead of forcing everyone to install the .NET 10 SDK. If you have the .NET 10 SDK installed locally, feel free to change `TargetFramework` to `net10.0` in `src\ce-host\CeHost.csproj`.
 
 ---
 
-## Licence and attribution
+## Caveats & Limitations
 
-- **Loader and sample plugin sources in this repository**: MIT licensed, see [`LICENSE`](./LICENSE).
-- **Lib.Harmony**: MIT licensed, see [pardeike/Harmony](https://github.com/pardeike/Harmony). The `0Harmony.dll` distributed in releases (the net48 build of Lib.Harmony 2.4.2) is redistributed under that licence.
-- **Plain Craft Launcher 2**: copyright its original authors. PCL is **not** released under a conventional open-source licence — its `LICENCE` is a limited distribution licence (see the `LICENCE` file in the PCL repository). This repository **does not redistribute PCL**, nor does it contain PCL's source; the loader merely patches your local copy of PCL at runtime. Check both your local regulations and PCL's licence terms before use.
+Please keep these trade-offs in mind before relying on this project:
+
+1. **Launcher updates will likely break your plugins.**
+Patches rely on exact method signatures and IL structures reverse-engineered from specific builds (Official `2.99.0.0` and CE `2.15.1.0`). When either launcher updates, your plugins will probably need updating too.
+2. **Sample plugins are code demos, not end-user features.**
+`Example.dll` and `Example-Title.dll` exist solely to show developers how the API works.
+3. **Security warning: Plugins run with full trust.**
+Plugins execute directly inside the launcher's process with the exact same OS permissions as the launcher itself—equivalent to running arbitrary native code. **Only install `.dll` files from sources you completely trust.**
+4. **This is an unofficial runtime hook, not an official plugin API.**
+Neither Official PCL nor PCL-CE natively supports plugins. We're forcing our way in via `AppDomainManager` injection and `DOTNET_STARTUP_HOOKS`.
+5. **PCL-CE must be started via the generated `.cmd` script.**
+Double-clicking the CE `.exe` directly won't load any plugins because single-file bundles ignore external config files, leaving environment variables as the only way to register the startup hook without modifying the binary.
+6. **Cross-launcher plugins still require writing two sets of patches.**
+Because the Official (VB.NET) and CE (C#) codebases have completely different internals, only the contract and loader plumbing are shared.
+
+---
+
+## License & Attribution
+
+* **Loader & sample plugins in this repository**: Licensed under the MIT License. See [LICENSE](./LICENSE).
+* **Lib.Harmony**: Licensed under the MIT License ([pardeike/Harmony](https://github.com/pardeike/Harmony)). The `0Harmony.dll` binaries distributed in Releases (Lib.Harmony 2.4.2, built for `net48` and `net10`) are redistributed under their original license.
+* **Plain Craft Launcher 2**: Copyright belongs to its original authors. Note that PCL is **not** distributed under a standard open-source license—it uses a custom license with distribution restrictions (see `LICENCE` in the PCL repository). **This repository does not redistribute the PCL binary or any of its source code**; it only applies in-memory patches to your local installation at runtime. Please ensure your use complies with local laws and PCL's license terms.
